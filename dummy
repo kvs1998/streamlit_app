@@ -45,11 +45,12 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 
 
 # Helper function for ROW-WISE conditional formatting
-def apply_row_style(row_original_data, display_column_names, color_by_option, thresholds):
+def apply_row_style(row_display_data, row_original_data, color_by_option, thresholds):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
     Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
-    This function receives `row_original_data` (a Series from final_filtered_metadata_df).
+    - row_display_data: A row from the DataFrame being styled (final_df_for_display_sorted), with display labels.
+    - row_original_data: A corresponding row from the original filtered_metadata_df, with original column names and numeric values.
     """
     style_str = ''
 
@@ -107,9 +108,9 @@ def apply_row_style(row_original_data, display_column_names, color_by_option, th
             elif ratio >= thresholds['lag_ratio']['ok']:
                 style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    # --- CRITICAL FIX: Return a Series with the correct display column names as index ---
-    # `display_column_names` will be passed from the main function.
-    return pd.Series(style_str, index=display_column_names)
+    # --- CRITICAL FIX: Return a Series with the exact column index of the DataFrame being styled ---
+    # `row_display_data.index` already has the correct column names (display labels).
+    return pd.Series(style_str, index=row_display_data.index)
 
 
 # --- REMOVED get_active_dt_names_from_snowflake function ---
@@ -346,7 +347,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
             if not mean_lag_values_to_plot.empty:
                 min_val = mean_lag_values_to_plot.min()
-                max_val = mean_val
+                max_val = mean_lag_values_to_plot.max()
                 
                 # Check for zero range to prevent division by zero or empty bins
                 if max_val - min_val < 1e-6:
@@ -408,26 +409,26 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                         x='Bin_Range',
                         y='Count',
                         labels={
-                            'Bin_Range': f'Mean Lag ({time_format_option})', # Dynamic label
+                            'Bin_Range': f'Mean Lag ({time_format_option})',
                             'Count': 'Number of DTs'
                         },
-                        text='Count' # Display count on top of bars
+                        text='Count'
                     )
                     fig_lag_hist.update_layout(bargap=0.1)
 
                     # --- X-axis formatting for histogram (no log scale here for this chart) ---
                     fig_lag_hist.update_xaxes(
-                        categoryorder='array', # Ensure custom order
+                        categoryorder='array',
                         categoryarray=binned_counts_df['Bin_Range'].tolist(),
-                        tickangle=0 # Force horizontal labels
+                        tickangle=0
                     )
-                    fig_lag_hist.update_traces(textposition='outside') # Text on top of bars
+                    fig_lag_hist.update_traces(textposition='outside')
                                 
                     st.plotly_chart(fig_lag_hist, use_container_width=True)
                 else: # mean_lag_values_to_plot is empty after binning
                     st.info("No mean lag data to display for histogram after unit conversion and binning.", icon="ℹ️")
             else: # mean_lag_values_to_plot is empty
-                st.info("No mean lag data to display for histogram after unit conversion.", icon="ℹ️")
+                st.info("No mean lag data to display for selected filters.", icon="ℹ️")
         else:
             st.info("No mean lag data to display for selected filters.", icon="ℹ️")
 
@@ -526,9 +527,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = (df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'] * 100).round(1).astype(str) + '%'
 
 
-    # Define display columns and their labels (QUALIFIED_NAME is correctly handled)
+    # Define display columns and their labels
     dt_health_display_columns_order = [
-        'QUALIFIED_NAME',
+        'QUALIFIED_NAME', # This column IS already in metadata_df
         'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
@@ -537,7 +538,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     ]
     
     dt_health_display_labels = {
-        'QUALIFIED_NAME': 'Dynamic Table',
+        'QUALIFIED_NAME': 'Dynamic Table', # Label for the existing column
         'SCHEDULING_STATE_STATUS': 'Status',
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
@@ -560,7 +561,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # Determine sorting criteria
     original_sort_column_map = {
-        'Status': 'SCHEDULING_STATE_STATUS',
+        'Status': 'SCHEDULING_STATE_STATUS', # For Status, we need original name for custom sort logic
         'Mean Lag': 'MEAN_LAG_SEC',
         'Max Lag': 'MAXIMUM_LAG_SEC',
         'Time Above Target Lag': 'TIME_ABOVE_TARGET_LAG_SEC',
@@ -570,16 +571,17 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     sort_column_original_name = original_sort_column_map.get(color_by_option)
 
     if sort_column_original_name:
-        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns
-            ascending = True if color_by_option == 'Lag Ratio' else False
+        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns directly
+            ascending = True if color_by_option == 'Lag Ratio' else False # Lag Ratio: lower is worse, so sort ASC. Others: DESC.
             
-            # CRITICAL FIX FOR SORTING:
-            # We need to sort based on the original numeric values from final_filtered_metadata_df
-            # then use that sorted order to reindex final_df_for_display_sorted.
-            sort_order_index = final_filtered_metadata_df.sort_values(
+            # --- FIX FOR SORTING: Align by original QUALIFIED_NAME before reordering ---
+            # Ensure sorting uses the original numeric values but applies to the display DataFrame.
+            # Get the indices of the original DataFrame sorted by the numeric column.
+            # Then use .loc[] on the display DataFrame with these indices.
+            sort_order_indices = final_filtered_metadata_df.sort_values(
                 by=sort_column_original_name, ascending=ascending
             ).index
-            final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_index].reset_index(drop=True)
+            final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
             
         else: # Custom sort for 'Status' column (SCHEDULING_STATE_STATUS) based on severity
             status_severity_order = {
@@ -588,33 +590,39 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 'UPSTREAM_FAILED': 2,
                 'CANCELLED': 3,
                 'WARNING': 4,
-                'RUNNING': 5,
-                'SUCCEEDED': 6,
-                'UNKNOWN': 7
+                'RUNNING': 5, # Lower severity, if not also failing
+                'SUCCEEDED': 6, # Lowest severity
+                'UNKNOWN': 7 # Default last
             }
-            # Add temp sort keys to final_df_for_display_sorted for sorting
-            final_df_for_display_sorted['Temp_Sort_Key'] = final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(999)
-            final_df_for_display_sorted['Temp_Last_Refresh_Sort_Key'] = final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map({
+            # Create temporary sort keys on the original data, then apply sort to display df.
+            # Similar to the numeric sort, get sorted indices from original data.
+            final_filtered_metadata_df['Temp_Status_Sort_Key'] = final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(999)
+            final_filtered_metadata_df['Temp_Last_Refresh_Sort_Key'] = final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map({
                 'FAILED': 0, 'UPSTREAM_FAILED': 1, 'CANCELLED': 2, 'WARNING': 3, 'SUCCEEDED': 4, 'UNKNOWN': 5
             }).fillna(999)
 
-            final_df_for_display_sorted = final_df_for_display_sorted.sort_values(
-                by=['Temp_Sort_Key', 'Temp_Last_Refresh_Sort_Key'], ascending=[True, True]
-            ).drop(columns=['Temp_Sort_Key', 'Temp_Last_Refresh_Sort_Key']).reset_index(drop=True)
+            sort_order_indices = final_filtered_metadata_df.sort_values(
+                by=['Temp_Status_Sort_Key', 'Temp_Last_Refresh_Sort_Key'], ascending=[True, True]
+            ).index
+            final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
+            
+            # Clean up temp columns in original df if desired, though it's a copy
+            if 'Temp_Status_Sort_Key' in final_filtered_metadata_df.columns:
+                final_filtered_metadata_df = final_filtered_metadata_df.drop(columns=['Temp_Status_Sort_Key', 'Temp_Last_Refresh_Sort_Key'])
 
 
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
         # Apply the row style using apply_row_style function
-        # The lambda now passes the correct row from final_filtered_metadata_df
-        # to ensure original numeric values are used for thresholds.
-        # It also explicitly passes the display column names.
+        # This lambda receives a row from final_df_for_display_sorted (with display labels).
+        # It needs to find the corresponding row in final_filtered_metadata_df (with original names)
+        # to use for threshold checks.
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                # Get the corresponding row from the ORIGINAL final_filtered_metadata_df
-                # Use the 'Dynamic Table' column (which holds original QUALIFIED_NAME) to find it.
-                final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']].iloc[0],
-                final_df_for_display_sorted.columns, # Pass the display column names
+                row_display, # Pass the row from the display DataFrame
+                # Find the corresponding original row using the 'Dynamic Table' column (which holds the original QUALIFIED_NAME)
+                # Use .get() for safety against KeyError if for some reason a row isn't found (though unlikely here)
+                final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']].iloc[0] if 'Dynamic Table' in row_display else pd.Series(),
                 color_by_option,
                 thresholds
             ), 
