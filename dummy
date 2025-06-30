@@ -44,17 +44,19 @@ BG_COLOR_CRITICAL = '#ffcccc' # Light Red
 BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 
 
-# Helper function to apply ROW-WISE fixed cell styles (Status, Last Refresh Status)
+# Helper function for ROW-WISE conditional formatting
 def apply_row_style(row, color_by_option, thresholds):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
-    Returns a list of CSS style strings (one for each column).
+    Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
+    This function expects 'row' to be a Pandas Series representing a row from `final_filtered_metadata_df`
+    (i.e., with original column names).
     """
     style_str = ''
 
     if color_by_option == 'Status':
-        status = row.get('SCHEDULING_STATE_STATUS') # Use original column name
-        last_refresh_state = row.get('LAST_COMPLETED_REFRESH_STATE') # Use original column name
+        status = row.get('SCHEDULING_STATE_STATUS')
+        last_refresh_state = row.get('LAST_COMPLETED_REFRESH_STATE')
         if status == 'SUSPENDED':
             style_str = f'background-color: {BG_COLOR_INFO}'
         elif status == 'RUNNING' and last_refresh_state in ['FAILED', 'UPSTREAM_FAILED', 'CANCELLED']:
@@ -106,12 +108,23 @@ def apply_row_style(row, color_by_option, thresholds):
             elif ratio >= thresholds['lag_ratio']['ok']:
                 style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    # Return a list of styles, one for each column.
-    # The same style_str applies to every cell in the row.
-    return [style_str] * len(row)
-
-
-# --- REMOVED get_active_dt_names_from_snowflake function ---
+    # --- CRITICAL FIX: Return a Series with the correct display column names ---
+    # Need access to the dt_health_display_labels mapping here or pass it.
+    # Simpler: Create a Series using the style_str and assign its index from the target DataFrame's columns.
+    # The lambda function will pass `final_df_for_display.columns` as `row.index` implicitly, so we can use it.
+    
+    # We must ensure `row.index` corresponds to the column names of the DataFrame
+    # to which the styler is being applied (`final_df_for_display`).
+    
+    # The `row` object passed to this function will have the original column names.
+    # The `pd.Series([style_str] * len(row))` creates a Series with a default integer index.
+    # Pandas is complaining about this index not matching the target DataFrame's column labels.
+    
+    # FIX: The row being passed to `apply_row_style` must be the row from `final_df_for_display`
+    # which already has the display labels as its index (columns).
+    
+    # This means the `lambda` function needs to change.
+    return pd.Series(style_str, index=row.index) # Apply style_str to all columns in the row
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -131,7 +144,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     # --- Direct use of metadata_df as the filtered_metadata_df ---
-    # The `metadata_df` is assumed to contain the exact set of DTs you want to display.
     filtered_metadata_df = metadata_df.copy() 
 
     if filtered_metadata_df.empty:
@@ -511,9 +523,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = (df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'] * 100).round(1).astype(str) + '%'
 
 
-    # Define display columns and their labels (QUALIFIED_NAME is correctly handled)
+    # Define display columns and their labels
     dt_health_display_columns_order = [
-        'QUALIFIED_NAME',
+        'QUALIFIED_NAME', # This column IS already in metadata_df
         'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
@@ -522,7 +534,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     ]
     
     dt_health_display_labels = {
-        'QUALIFIED_NAME': 'Dynamic Table',
+        'QUALIFIED_NAME': 'Dynamic Table', # Label for the existing column
         'SCHEDULING_STATE_STATUS': 'Status',
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
@@ -537,11 +549,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     }
 
     # Select and rename columns for the display DataFrame
-    # Ensure all columns in dt_health_display_columns_order are present in df_for_display (after FTM conversions)
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
 
 
     # --- Apply Styling and Sorting ---
+
+    # Make a copy for sorting and styling
     final_df_for_display = df_for_display.copy()
 
     # Determine sorting criteria
@@ -557,18 +570,21 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     sort_column_original_name = original_sort_column_map.get(color_by_option)
 
     if sort_column_original_name:
-        # Use the original numeric data from final_filtered_metadata_df for accurate sorting
-        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns
+        # Get the corresponding numeric data from the original (unformatted) final_filtered_metadata_df for sorting
+        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns directly
             ascending = True if color_by_option == 'Lag Ratio' else False # Lag Ratio: lower is worse, so sort ASC. Others: DESC.
-            final_df_for_display = final_df_for_display.set_index('Dynamic Table', drop=False) # Keep original index and column for merge
-            # Sort by the original numeric column from final_filtered_metadata_df, then re-align
-            final_df_for_display = final_df_for_display.loc[
-                final_filtered_metadata_df.sort_values(by=sort_column_original_name, ascending=ascending)['QUALIFIED_NAME']
-            ].reset_index(drop=True)
+            
+            # CRITICAL FIX FOR SORTING:
+            # We need to sort final_df_for_display based on the original numeric values.
+            # Use the index to reorder df_for_display based on sorted original data.
+            sort_order_index = final_filtered_metadata_df.sort_values(
+                by=sort_column_original_name, ascending=ascending
+            ).index
+            final_df_for_display = final_df_for_display.loc[sort_order_index].reset_index(drop=True)
             
         else: # Custom sort for 'Status' column (SCHEDULING_STATE_STATUS) based on severity
             status_severity_order = {
-                'SUSPENDED': 0, # Highest severity for custom sorting (e.g., red/blue)
+                'SUSPENDED': 0, # Highest severity for custom sorting
                 'FAILED': 1,
                 'UPSTREAM_FAILED': 2,
                 'CANCELLED': 3,
@@ -602,11 +618,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # Apply styling (row-wise background color)
     if color_by_option != 'None':
         # Apply the row style using apply_row_style function
-        # This function needs original data for thresholds but returns styles for the current df_for_display structure.
         styled_df = final_df_for_display.style.apply(
-            lambda row: apply_row_style(
-                # Get the original row based on the QUALIFIED_NAME to use original values for styling
-                final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row['Dynamic Table']].iloc[0],
+            lambda row_display: apply_row_style(
+                # Get the corresponding row from the original final_filtered_metadata_df
+                # to use original column names and numeric values for threshold checks.
+                # Use the 'Dynamic Table' value (QUALIFIED_NAME) as the key to find the original row.
+                final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']].iloc[0],
                 color_by_option,
                 thresholds
             ), 
