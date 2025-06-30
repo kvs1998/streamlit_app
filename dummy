@@ -45,18 +45,17 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 
 
 # Helper function for ROW-WISE conditional formatting
-def apply_row_style(row, color_by_option, thresholds):
+def apply_row_style(row_original_data, display_column_names, color_by_option, thresholds):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
     Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
-    This function expects 'row' to be a Pandas Series representing a row from `final_filtered_metadata_df`
-    (i.e., with original column names).
+    This function receives `row_original_data` (a Series from final_filtered_metadata_df).
     """
     style_str = ''
 
     if color_by_option == 'Status':
-        status = row.get('SCHEDULING_STATE_STATUS')
-        last_refresh_state = row.get('LAST_COMPLETED_REFRESH_STATE')
+        status = row_original_data.get('SCHEDULING_STATE_STATUS')
+        last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
         if status == 'SUSPENDED':
             style_str = f'background-color: {BG_COLOR_INFO}'
         elif status == 'RUNNING' and last_refresh_state in ['FAILED', 'UPSTREAM_FAILED', 'CANCELLED']:
@@ -69,7 +68,7 @@ def apply_row_style(row, color_by_option, thresholds):
              style_str = f'background-color: {BG_COLOR_WARNING}'
 
     elif color_by_option == 'Mean Lag':
-        lag = row.get('MEAN_LAG_SEC')
+        lag = row_original_data.get('MEAN_LAG_SEC')
         if pd.notna(lag):
             if lag >= thresholds['mean_lag']['critical']:
                 style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -79,7 +78,7 @@ def apply_row_style(row, color_by_option, thresholds):
                 style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Max Lag':
-        lag = row.get('MAXIMUM_LAG_SEC')
+        lag = row_original_data.get('MAXIMUM_LAG_SEC')
         if pd.notna(lag):
             if lag >= thresholds['max_lag']['critical']:
                 style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -89,7 +88,7 @@ def apply_row_style(row, color_by_option, thresholds):
                 style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Time Above Target Lag':
-        time_above = row.get('TIME_ABOVE_TARGET_LAG_SEC')
+        time_above = row_original_data.get('TIME_ABOVE_TARGET_LAG_SEC')
         if pd.notna(time_above):
             if time_above > thresholds['time_above']['critical']:
                 style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -99,7 +98,7 @@ def apply_row_style(row, color_by_option, thresholds):
                 style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Lag Ratio':
-        ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
+        ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
         if pd.notna(ratio):
             if ratio < thresholds['lag_ratio']['critical']: # Lower ratio is worse
                 style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -108,23 +107,12 @@ def apply_row_style(row, color_by_option, thresholds):
             elif ratio >= thresholds['lag_ratio']['ok']:
                 style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    # --- CRITICAL FIX: Return a Series with the correct display column names ---
-    # Need access to the dt_health_display_labels mapping here or pass it.
-    # Simpler: Create a Series using the style_str and assign its index from the target DataFrame's columns.
-    # The lambda function will pass `final_df_for_display.columns` as `row.index` implicitly, so we can use it.
-    
-    # We must ensure `row.index` corresponds to the column names of the DataFrame
-    # to which the styler is being applied (`final_df_for_display`).
-    
-    # The `row` object passed to this function will have the original column names.
-    # The `pd.Series([style_str] * len(row))` creates a Series with a default integer index.
-    # Pandas is complaining about this index not matching the target DataFrame's column labels.
-    
-    # FIX: The row being passed to `apply_row_style` must be the row from `final_df_for_display`
-    # which already has the display labels as its index (columns).
-    
-    # This means the `lambda` function needs to change.
-    return pd.Series(style_str, index=row.index) # Apply style_str to all columns in the row
+    # --- CRITICAL FIX: Return a Series with the correct display column names as index ---
+    # `display_column_names` will be passed from the main function.
+    return pd.Series(style_str, index=display_column_names)
+
+
+# --- REMOVED get_active_dt_names_from_snowflake function ---
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -358,14 +346,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
             if not mean_lag_values_to_plot.empty:
                 min_val = mean_lag_values_to_plot.min()
-                max_val = mean_lag_values_to_plot.max()
-
-                if max_val == min_val:
-                    binsize_plot_unit_mean_lag = max(1.0, max_val / 5)
-                    if binsize_plot_unit_mean_lag == 0: binsize_plot_unit_mean_lag = 1.0
-                elif max_val - min_val < 1e-6 and max_val > 0:
-                    binsize_plot_unit_mean_lag = (max_val - min_val) / 2
-                    if binsize_plot_unit_mean_lag == 0: binsize_plot_unit_mean_lag = 1.0
+                max_val = mean_val
+                
+                # Check for zero range to prevent division by zero or empty bins
+                if max_val - min_val < 1e-6:
+                    if max_val == 0:
+                        binsize_plot_unit_mean_lag = 1.0 # Default bin size if all are zero
+                    else:
+                        binsize_plot_unit_mean_lag = max_val / 5 if max_val > 0 else 1.0
                 else:
                     num_desired_bins = 20
                     binsize_plot_unit_mean_lag = (max_val - min_val) / num_desired_bins
@@ -376,54 +364,69 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                         binsize_plot_unit_mean_lag = max(0.01, binsize_plot_unit_mean_lag)
                     elif time_format_option == 'days':
                         binsize_plot_unit_mean_lag = max(0.001, binsize_plot_unit_mean_lag)
-                    else:
+                    else: # seconds or mixed
                         binsize_plot_unit_mean_lag = max(1.0, binsize_plot_unit_mean_lag)
                     
-                    if binsize_plot_unit_mean_lag >= 1:
+                    if binsize_plot_unit_mean_lag >= 1: # Round if 1 or greater
                         binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag)
-                    elif binsize_plot_unit_mean_lag >= 0.1:
+                    elif binsize_plot_unit_mean_lag >= 0.1: # Round to 1 decimal
                         binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 1)
-                    elif binsize_plot_unit_mean_lag >= 0.01:
+                    elif binsize_plot_unit_mean_lag >= 0.01: # Round to 2 decimals
                         binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 2)
-                    elif binsize_plot_unit_mean_lag >= 0.001:
+                    elif binsize_plot_unit_mean_lag >= 0.001: # Round to 3 decimals
                         binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 3)
 
-                bins = np.arange(0, max_val + binsize_plot_unit_mean_lag + 1e-9, binsize_plot_unit_mean_lag)
+                # Create bin edges starting from 0
+                # Ensure max_val is included: bins should extend slightly beyond max_val.
+                # If max_val and min_val are identical, ensure `bins` has at least two edges.
+                if max_val == min_val:
+                    bins = np.array([min_val, min_val + binsize_plot_unit_mean_lag])
+                else:
+                    bins = np.arange(0, max_val + binsize_plot_unit_mean_lag + 1e-9, binsize_plot_unit_mean_lag)
                 
-                binned_data_series = pd.cut(
-                    mean_lag_values_to_plot,
-                    bins=bins,
-                    right=False,
-                    include_lowest=True
-                ).astype(str)
+                # Assign data to bins and get counts
+                # Ensure binned_data_series is not empty before value_counts()
+                if not mean_lag_values_to_plot.empty:
+                    binned_data_series = pd.cut(
+                        mean_lag_values_to_plot,
+                        bins=bins,
+                        right=False, # [start, end)
+                        include_lowest=True # Include 0 in the first bin
+                    ).astype(str) # Convert to string for Plotly sorting
 
-                binned_counts_df = binned_data_series.value_counts().reset_index()
-                binned_counts_df.columns = ['Bin_Range', 'Count']
-                
-                binned_counts_df['Bin_Start_Sort'] = binned_counts_df['Bin_Range'].apply(lambda x: float(x.split(',')[0].replace('[', '')) if pd.notna(x) and '[' in x else -np.inf)
-                binned_counts_df = binned_counts_df.sort_values('Bin_Start_Sort').drop(columns='Bin_Start_Sort').reset_index(drop=True)
+                    # Filter out 'NaN' bins (for data outside explicit bins)
+                    binned_counts_df = binned_data_series.value_counts().reset_index()
+                    binned_counts_df.columns = ['Bin_Range', 'Count']
+                    
+                    # Sort bins properly for visualization
+                    binned_counts_df['Bin_Start_Sort'] = binned_counts_df['Bin_Range'].apply(lambda x: float(x.split(',')[0].replace('[', '')) if pd.notna(x) and '[' in x else -np.inf)
+                    binned_counts_df = binned_counts_df.sort_values('Bin_Start_Sort').drop(columns='Bin_Start_Sort').reset_index(drop=True)
 
-                fig_lag_hist = px.bar(
-                    binned_counts_df,
-                    x='Bin_Range',
-                    y='Count',
-                    labels={
-                        'Bin_Range': f'Mean Lag ({time_format_option})',
-                        'Count': 'Number of DTs'
-                    },
-                    text='Count'
-                )
-                fig_lag_hist.update_layout(bargap=0.1)
+                    # --- CREATE PLOTLY EXPRESS BAR CHART (acting as a histogram) ---
+                    fig_lag_hist = px.bar(
+                        binned_counts_df,
+                        x='Bin_Range',
+                        y='Count',
+                        labels={
+                            'Bin_Range': f'Mean Lag ({time_format_option})', # Dynamic label
+                            'Count': 'Number of DTs'
+                        },
+                        text='Count' # Display count on top of bars
+                    )
+                    fig_lag_hist.update_layout(bargap=0.1)
 
-                fig_lag_hist.update_xaxes(
-                    categoryorder='array',
-                    categoryarray=binned_counts_df['Bin_Range'].tolist(),
-                    tickangle=0
-                )
-                fig_lag_hist.update_traces(textposition='outside')
-                            
-                st.plotly_chart(fig_lag_hist, use_container_width=True)
-            else:
+                    # --- X-axis formatting for histogram (no log scale here for this chart) ---
+                    fig_lag_hist.update_xaxes(
+                        categoryorder='array', # Ensure custom order
+                        categoryarray=binned_counts_df['Bin_Range'].tolist(),
+                        tickangle=0 # Force horizontal labels
+                    )
+                    fig_lag_hist.update_traces(textposition='outside') # Text on top of bars
+                                
+                    st.plotly_chart(fig_lag_hist, use_container_width=True)
+                else: # mean_lag_values_to_plot is empty after binning
+                    st.info("No mean lag data to display for histogram after unit conversion and binning.", icon="ℹ️")
+            else: # mean_lag_values_to_plot is empty
                 st.info("No mean lag data to display for histogram after unit conversion.", icon="ℹ️")
         else:
             st.info("No mean lag data to display for selected filters.", icon="ℹ️")
@@ -523,9 +526,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = (df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'] * 100).round(1).astype(str) + '%'
 
 
-    # Define display columns and their labels
+    # Define display columns and their labels (QUALIFIED_NAME is correctly handled)
     dt_health_display_columns_order = [
-        'QUALIFIED_NAME', # This column IS already in metadata_df
+        'QUALIFIED_NAME',
         'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
@@ -534,7 +537,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     ]
     
     dt_health_display_labels = {
-        'QUALIFIED_NAME': 'Dynamic Table', # Label for the existing column
+        'QUALIFIED_NAME': 'Dynamic Table',
         'SCHEDULING_STATE_STATUS': 'Status',
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
@@ -552,15 +555,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
 
 
-    # --- Apply Styling and Sorting ---
-
-    # Make a copy for sorting and styling
-    final_df_for_display = df_for_display.copy()
+    # --- Apply Sorting ---
+    final_df_for_display_sorted = df_for_display.copy()
 
     # Determine sorting criteria
-    # Map from display label to original numeric column name (for sorting on actual values)
     original_sort_column_map = {
-        'Status': 'SCHEDULING_STATE_STATUS', # For Status, we need original name for custom sort logic
+        'Status': 'SCHEDULING_STATE_STATUS',
         'Mean Lag': 'MEAN_LAG_SEC',
         'Max Lag': 'MAXIMUM_LAG_SEC',
         'Time Above Target Lag': 'TIME_ABOVE_TARGET_LAG_SEC',
@@ -570,60 +570,51 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     sort_column_original_name = original_sort_column_map.get(color_by_option)
 
     if sort_column_original_name:
-        # Get the corresponding numeric data from the original (unformatted) final_filtered_metadata_df for sorting
-        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns directly
-            ascending = True if color_by_option == 'Lag Ratio' else False # Lag Ratio: lower is worse, so sort ASC. Others: DESC.
+        if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns
+            ascending = True if color_by_option == 'Lag Ratio' else False
             
             # CRITICAL FIX FOR SORTING:
-            # We need to sort final_df_for_display based on the original numeric values.
-            # Use the index to reorder df_for_display based on sorted original data.
+            # We need to sort based on the original numeric values from final_filtered_metadata_df
+            # then use that sorted order to reindex final_df_for_display_sorted.
             sort_order_index = final_filtered_metadata_df.sort_values(
                 by=sort_column_original_name, ascending=ascending
             ).index
-            final_df_for_display = final_df_for_display.loc[sort_order_index].reset_index(drop=True)
+            final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_index].reset_index(drop=True)
             
         else: # Custom sort for 'Status' column (SCHEDULING_STATE_STATUS) based on severity
             status_severity_order = {
-                'SUSPENDED': 0, # Highest severity for custom sorting
+                'SUSPENDED': 0, # Highest severity
                 'FAILED': 1,
                 'UPSTREAM_FAILED': 2,
                 'CANCELLED': 3,
                 'WARNING': 4,
-                'RUNNING': 5, # Lower severity, if not also failing
-                'SUCCEEDED': 6, # Lowest severity
-                'UNKNOWN': 7 # Default last
+                'RUNNING': 5,
+                'SUCCEEDED': 6,
+                'UNKNOWN': 7
             }
-            # Create a temporary sort key based on the original Status column values
-            final_df_for_display['Temp_Sort_Key'] = final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(999)
-            
-            # For 'Status' sorting, we also consider 'Last Refresh Status' for 'RUNNING' issues
-            last_refresh_status_severity_order = {
-                'FAILED': 0,
-                'UPSTREAM_FAILED': 1,
-                'CANCELLED': 2,
-                'WARNING': 3,
-                'SUCCEEDED': 4,
-                'UNKNOWN': 5
-            }
-            final_df_for_display['Temp_Last_Refresh_Sort_Key'] = final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map(last_refresh_status_severity_order).fillna(999)
+            # Add temp sort keys to final_df_for_display_sorted for sorting
+            final_df_for_display_sorted['Temp_Sort_Key'] = final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(999)
+            final_df_for_display_sorted['Temp_Last_Refresh_Sort_Key'] = final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map({
+                'FAILED': 0, 'UPSTREAM_FAILED': 1, 'CANCELLED': 2, 'WARNING': 3, 'SUCCEEDED': 4, 'UNKNOWN': 5
+            }).fillna(999)
 
-            # Sort first by 'Status' severity, then by 'Last Refresh Status' severity for ties
-            final_df_for_display = final_df_for_display.sort_values(
+            final_df_for_display_sorted = final_df_for_display_sorted.sort_values(
                 by=['Temp_Sort_Key', 'Temp_Last_Refresh_Sort_Key'], ascending=[True, True]
-            ).drop(columns=['Temp_Sort_Key', 'Temp_Last_Refresh_Sort_Key'])
-            
-            final_df_for_display = final_df_for_display.reset_index(drop=True)
+            ).drop(columns=['Temp_Sort_Key', 'Temp_Last_Refresh_Sort_Key']).reset_index(drop=True)
 
 
-    # Apply styling (row-wise background color)
+    # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
         # Apply the row style using apply_row_style function
-        styled_df = final_df_for_display.style.apply(
+        # The lambda now passes the correct row from final_filtered_metadata_df
+        # to ensure original numeric values are used for thresholds.
+        # It also explicitly passes the display column names.
+        styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                # Get the corresponding row from the original final_filtered_metadata_df
-                # to use original column names and numeric values for threshold checks.
-                # Use the 'Dynamic Table' value (QUALIFIED_NAME) as the key to find the original row.
+                # Get the corresponding row from the ORIGINAL final_filtered_metadata_df
+                # Use the 'Dynamic Table' column (which holds original QUALIFIED_NAME) to find it.
                 final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']].iloc[0],
+                final_df_for_display_sorted.columns, # Pass the display column names
                 color_by_option,
                 thresholds
             ), 
@@ -635,7 +626,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         )
     else: # Render without styling
         st.dataframe(
-            final_df_for_display,
+            final_df_for_display_sorted, # Display the sorted df without styling
             use_container_width=True
         )
 
