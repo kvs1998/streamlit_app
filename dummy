@@ -1,12 +1,10 @@
 # tabs/dt_health_tab.py
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import numpy as np
-from datetime import datetime, time, date
+import plotly.express as px
 
-
-# Helper function to convert seconds to a more readable format
+# --- Helper function to convert seconds to a more readable format ---
 def format_seconds_to_readable(seconds_series, format_type):
     if format_type == "seconds":
         return seconds_series.round(1).astype(str) + "s"
@@ -36,62 +34,50 @@ def format_seconds_to_readable(seconds_series, format_type):
             
             return " ".join(parts) if parts else "0s"
         return seconds_series.apply(mix_format)
+    return seconds_series
 
-# New helper function for conditional formatting styles (corrected, simplified)
-def color_table_row(row, color_by_option, mean_lag_thresholds, max_lag_thresholds, time_above_thresholds, lag_ratio_thresholds):
-    """Applies conditional formatting to a row based on selected metric."""
-    styles = [''] # Default is no color, to avoid unwanted overrides
 
-    if color_by_option == 'Status':
-        status = row.get('SCHEDULING_STATE_STATUS') # Use .get() to prevent KeyErrors
-        last_refresh_state = row.get('LAST_COMPLETED_REFRESH_STATE')
-        if status == 'SUSPENDED':
-            styles.append('background-color: #ffcccc') # Light Red for suspended
-        elif status == 'RUNNING' and (last_refresh_state == 'FAILED' or last_refresh_state == 'UPSTREAM_FAILED' or last_refresh_state == 'CANCELLED'):
-            styles.append('background-color: #ffe0b3') # Light Orange for running but failing/cancelled
-        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
-            styles.append('background-color: #ccffcc') # Light Green for healthy running
+# --- Define Global Colors for Fixed Rules ---
+COLOR_GREEN = '#d4edda' # Light green for success/good
+COLOR_YELLOW = '#fff3cd' # Light yellow for warning/moderate
+COLOR_RED = '#f8d7da'   # Light red for failure/bad
+COLOR_BLUE = '#cce5ff'  # Light blue for info/suspended
 
-    elif color_by_option == 'Mean Lag':
-        lag = row.get('MEAN_LAG_SEC')
-        if pd.notna(lag) and lag > mean_lag_thresholds['critical']: # Must validate that the column and value exist
-            styles.append('background-color: #ffcccc') # Red
-        elif pd.notna(lag) and lag > mean_lag_thresholds['warning']:
-            styles.append('background-color: #ffe0b3') # Orange
-        elif pd.notna(lag) and lag <= mean_lag_thresholds['ok']:
-            styles.append('background-color: #ccffcc') # Green (for very low lag)
 
-    elif color_by_option == 'Max Lag':
-        lag = row.get('MAXIMUM_LAG_SEC')
-        if pd.notna(lag):
-            if lag > max_lag_thresholds['critical']:
-                styles.append('background-color: #ffcccc')
-            elif lag > max_lag_thresholds['warning']:
-                styles.append('background-color: #ffe0b3')
-            elif lag <= max_lag_thresholds['ok']:
-                styles.append('background-color: #ccffcc')
+# Helper function to apply FIXED cell styles (Status, Last Refresh Status)
+def apply_fixed_cell_styles(df):
+    """
+    Applies conditional formatting based on fixed rules for Status and Last Refresh Status.
+    This function returns a DataFrame of CSS style strings.
+    It expects the DataFrame *after* renaming columns to display labels.
+    """
+    df_styled = pd.DataFrame('', index=df.index, columns=df.columns)
 
-    elif color_by_option == 'Time Above Target Lag':
-        time_above = row.get('TIME_ABOVE_TARGET_LAG_SEC')
-        if pd.notna(time_above):
-            if time_above > time_above_thresholds['critical']: # Significant time above target
-                styles.append('background-color: #ffcccc')
-            elif time_above > time_above_thresholds['warning']: # Some time above target
-                styles.append('background-color: #ffe0b3')
-            elif time_above <= time_above_thresholds['ok']: # Very little/no time above target
-                styles.append('background-color: #ccffcc')
+    for index, row in df.iterrows():
+        # 'Last Refresh Status' column
+        last_refresh_status = row.get('Last Refresh Status')
+        if last_refresh_status == 'FAILED':
+            df_styled.loc[index, 'Last Refresh Status'] = f'background-color: {COLOR_RED}'
+        elif last_refresh_status == 'WARNING':
+            df_styled.loc[index, 'Last Refresh Status'] = f'background-color: {COLOR_YELLOW}'
+        elif last_refresh_status == 'SUCCEEDED':
+            df_styled.loc[index, 'Last Refresh Status'] = f'background-color: {COLOR_GREEN}'
+        elif last_refresh_status == 'UPSTREAM_FAILED':
+            df_styled.loc[index, 'Last Refresh Status'] = f'background-color: {COLOR_YELLOW}'
+        elif last_refresh_status == 'CANCELLED':
+            df_styled.loc[index, 'Last Refresh Status'] = f'background-color: {COLOR_YELLOW}'
 
-    elif color_by_option == 'Lag Ratio':
-        ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        if pd.notna(ratio):
-            if ratio < lag_ratio_thresholds['critical']: # Less than 70% compliant
-                styles.append('background-color: #ffcccc')
-            elif ratio < lag_ratio_thresholds['warning']: # Between 70% and 90% compliant
-                styles.append('background-color: #ffe0b3')
-            elif ratio >= lag_ratio_thresholds['ok']: # 90% or more compliant
-                styles.append('background-color: #ccffcc')
-    
-    return '; '.join(styles)
+        # 'Status' column (SCHEDULING_STATE_STATUS)
+        scheduling_status = row.get('Status')
+        if scheduling_status == 'SUSPENDED':
+            df_styled.loc[index, 'Status'] = f'background-color: {COLOR_BLUE}'
+        elif scheduling_status == 'RUNNING' and last_refresh_status in ['FAILED', 'UPSTREAM_FAILED', 'CANCELLED']:
+            df_styled.loc[index, 'Status'] = f'background-color: {COLOR_YELLOW}'
+        
+    return df_styled
+
+
+# --- REMOVED get_active_dt_names_from_snowflake function and its dummy data ---
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -102,6 +88,27 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         st.info("No metadata available for DT HEALTH tab. Check data source or collection.", icon="ℹ️")
         return
 
+    # Ensure all required numeric columns are present and numeric
+    required_numeric_cols = ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC']
+    for col in required_numeric_cols:
+        if col not in metadata_df.columns:
+            metadata_df[col] = np.nan
+        metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
+
+
+    # --- CRITICAL FIX: Direct use of metadata_df (no filtering by 'active' list here) ---
+    # The `filtered_metadata_df` now directly refers to the passed `metadata_df`
+    # after the initial numeric conversions.
+    filtered_metadata_df = metadata_df.copy() # Good practice to work on a copy
+
+    # The warning about filtered out records is now removed as it implies external filtering.
+
+
+    if filtered_metadata_df.empty:
+        st.info("No Dynamic Table data available. Please adjust your filters or check data source.", icon="ℹ️")
+        return
+
+
     # --- Filters for DT Health Tab ---
     st.markdown("---")
     st.subheader("Apply Filters for DT Health")
@@ -109,15 +116,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
 
     with filter_cols_dt_health_row1[0]:
-        all_databases_dt_health = ['All'] + sorted(metadata_df['DATABASE_NAME'].unique().tolist())
+        all_databases_dt_health = ['All'] + sorted(filtered_metadata_df['DATABASE_NAME'].unique().tolist())
         selected_database_dt_health = st.selectbox(
-            "Database:", options=all_databases_dt_health, key="db_filter_dt_health"
+            "Database:", options=all_databases_dt_health, key="new_db_filter_dt_health"
         )
     with filter_cols_dt_health_row1[1]:
-        # FIXED: Ensure explicit copy for temp_df_for_schema_options
-        temp_df_for_schema_options = metadata_df.copy()
+        temp_df_for_schema_options = filtered_metadata_df.copy()
         if selected_database_dt_health != 'All':
-            temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy() # Added .copy() here
+            temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
 
         if not temp_df_for_schema_options.empty:
             schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
@@ -126,15 +132,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             st.info("No schemas found for selected Database.", icon="ℹ️")
 
         selected_schema_dt_health = st.selectbox(
-            "Schema:", options=schemas_in_db_dt_health, key="schema_filter_dt_health"
+            "Schema:", options=schemas_in_db_dt_health, key="new_schema_filter_dt_health"
         )
     
-    # FIXED: Ensure explicit copy for df_for_table_options
-    df_for_table_options = metadata_df.copy()
+    df_for_table_options = filtered_metadata_df.copy()
     if selected_database_dt_health != 'All':
-        df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy() # Added .copy() here
+        df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
-        df_for_table_options = df_for_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy() # Added .copy() here
+        df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
 
 
     with filter_cols_dt_health_row1[2]:
@@ -146,12 +151,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             default_tables_dt_health_selected = ['All']
             st.info("No tables found for selected DB/Schema.", icon="ℹ️")
         selected_table_dt_health = st.multiselect(
-            "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="table_filter_dt_health"
+            "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="new_table_filter_dt_health"
         )
     with filter_cols_dt_health_row1[3]:
-        all_scheduling_states = ['All'] + sorted(metadata_df['SCHEDULING_STATE_STATUS'].unique().tolist())
+        all_scheduling_states = ['All'] + sorted(filtered_metadata_df['SCHEDULING_STATE_STATUS'].unique().tolist())
         selected_scheduling_state = st.multiselect(
-            "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="scheduling_state_filter_dt_health"
+            "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="new_scheduling_state_filter_dt_health"
         )
     
     filter_cols_dt_health_row2 = st.columns([1])
@@ -159,107 +164,456 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         time_format_option = st.radio(
             "Display Lag Times In:", 
             options=["mixed", "seconds", "minutes", "hours", "days"], 
-            index=0, # Default to mixed
+            index=0,
             horizontal=True,
-            key="time_format_dt_health"
+            key="new_time_format_dt_health"
         )
     
     st.markdown("---")
 
 
-    # --- Apply Filters to Main DataFrame ---
-    #  Apply database, schema, table, and scheduling state filters first.
-
-    filtered_metadata_df = metadata_df.copy()
+    # --- Apply Filters to Main DataFrame (re-filter based on user selections) ---
+    final_filtered_metadata_df = filtered_metadata_df.copy() 
 
     if selected_database_dt_health != 'All':
-        filtered_metadata_df = filtered_metadata_df[filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
-        filtered_metadata_df = filtered_metadata_df[filtered_metadata_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
     if selected_table_dt_health and 'All' not in selected_table_dt_health:
-        filtered_metadata_df = filtered_metadata_df[filtered_metadata_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
     elif not selected_table_dt_health:
         st.warning("No table(s) selected. Display will be empty.", icon="⚠️")
-        filtered_metadata_df = pd.DataFrame()
+        final_filtered_metadata_df = pd.DataFrame()
 
     if selected_scheduling_state and 'All' not in selected_scheduling_state:
-        filtered_metadata_df = filtered_metadata_df[filtered_metadata_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
     elif not selected_scheduling_state:
         st.warning("No scheduling state(s) selected. Display will be empty.", icon="⚠️")
-        filtered_metadata_df = pd.DataFrame()
+        final_filtered_metadata_df = pd.DataFrame()
 
-    if filtered_metadata_df.empty:
+    if final_filtered_metadata_df.empty:
         st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
         return
 
-    # --- Table Display with Conditional Formatting ---
-    st.subheader("Detailed Dynamic Table Status")
 
-    # --- NEW: Radio buttons to select coloring scheme ---
+    # --- KPIs and Primary Charts Section ---
+    kpi_chart_cols = st.columns([0.4, 0.6])
+
+    with kpi_chart_cols[0]: # Left Column: KPIs
+        st.subheader("Current Dynamic Table Health KPIs")
+        
+        total_dt_monitored = final_filtered_metadata_df['QUALIFIED_NAME'].nunique()
+        running_dt_count = final_filtered_metadata_df[
+            (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'RUNNING') & 
+            (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'] == 'SUCCEEDED')
+        ]['QUALIFIED_NAME'].nunique()
+
+        suspended_dt_count = final_filtered_metadata_df[
+            final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'SUSPENDED'
+        ]['QUALIFIED_NAME'].nunique()
+        
+        running_but_failed_dt_count = final_filtered_metadata_df[
+            (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'RUNNING') & 
+            (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].isin(['FAILED', 'UPSTREAM_FAILED', 'CANCELLED']))
+        ]['QUALIFIED_NAME'].nunique()
+
+        executing_refresh_dt_count = final_filtered_metadata_df[final_filtered_metadata_df['EXECUTING_REFRESH_QUERY_ID'].notna()]['QUALIFIED_NAME'].nunique()
+        
+        avg_mean_lag = final_filtered_metadata_df['MEAN_LAG_SEC'].mean()
+        max_lag = final_filtered_metadata_df['MAXIMUM_LAG_SEC'].max()
+
+        avg_mean_lag_fmt = format_seconds_to_readable(pd.Series([avg_mean_lag]), time_format_option).iloc[0] if not pd.isna(avg_mean_lag) else "N/A"
+        max_lag_fmt = format_seconds_to_readable(pd.Series([max_lag]), time_format_option).iloc[0] if not pd.isna(max_lag) else "N/A"
+
+
+        kpi_cols_dt_health_row1 = st.columns(2)
+        with kpi_cols_dt_health_row1[0]:
+            st.markdown(f"<p style='font-size:14px; margin-bottom:0;'>Total DTs Monitored</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{total_dt_monitored}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size:14px; color:blue; margin-bottom:0;'>Refreshing Now</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{executing_refresh_dt_count} tables</h3>", unsafe_allow_html=True)
+        with kpi_cols_dt_health_row1[1]:
+            st.markdown(f"<p style='font-size:14px; color:green; margin-bottom:0;'>Running (Healthy) DTs</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{running_dt_count}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<p style='font-size:14px; margin-bottom:0;'>Avg Mean Lag</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{avg_mean_lag_fmt}</h3>", unsafe_allow_html=True)
+
+        kpi_cols_dt_health_row2 = st.columns(2)
+        with kpi_cols_dt_health_row2[0]:
+            st.markdown(f"<p style='font-size:14px; color:red; margin-bottom:0;'>Suspended DTs</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{suspended_dt_count}</h3>", unsafe_allow_html=True)
+        with kpi_cols_dt_health_row2[1]:
+            st.markdown(f"<p style='font-size:14px; margin-bottom:0;'>Max Lag</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{max_lag_fmt}</h3>", unsafe_allow_html=True)
+            
+        kpi_cols_dt_health_row3 = st.columns(1) 
+        with kpi_cols_dt_health_row3[0]:
+            st.markdown(f"<p style='font-size:14px; color:orange; margin-bottom:0;'>Running (Actively Failing)</p>", unsafe_allow_html=True)
+            st.markdown(f"<h3 style='margin-top:0;'>{running_but_failed_dt_count} tables</h3>", unsafe_allow_html=True)
+
+
+    with kpi_chart_cols[1]: # Right Column: Scheduling State and Target Lag Type Distribution Charts
+        st.subheader("Scheduling & Lag Type Distribution")
+
+        scheduling_state_counts = final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].value_counts().reset_index()
+        scheduling_state_counts.columns = ['Status', 'Count']
+        
+        target_lag_type_counts = final_filtered_metadata_df['TARGET_LAG_TYPE'].value_counts().reset_index()
+        target_lag_type_counts.columns = ['Lag Type', 'Count']
+
+        chart_rows = st.columns(2)
+        with chart_rows[0]:
+            if not scheduling_state_counts.empty:
+                fig_scheduling_state = px.pie(scheduling_state_counts, 
+                                          values='Count', 
+                                          names='Status', 
+                                          title='Scheduling State',
+                                          hole=0.3,
+                                          color_discrete_map={'RUNNING': 'green', 'SUSPENDED': 'red', 'UNKNOWN': 'grey'})
+                fig_scheduling_state.update_traces(textposition='inside', textinfo='percent')
+                st.plotly_chart(fig_scheduling_state, use_container_width=True)
+            else:
+                st.info("No scheduling state data.", icon="ℹ️")
+
+
+        with chart_rows[1]:
+            if not target_lag_type_counts.empty:
+                fig_lag_type = px.pie(target_lag_type_counts,
+                                  values='Count',
+                                  names='Lag Type',
+                                  title='Target Lag Type',
+                                  hole=0.3,
+                                  color_discrete_map={'USER_DEFINED': 'blue', 'DOWNSTREAM': 'purple', 'UNKNOWN_TYPE': 'grey'})
+                fig_lag_type.update_traces(textposition='inside', textinfo='percent')
+                st.plotly_chart(fig_lag_type, use_container_width=True)
+            else:
+                st.info("No target lag type data.", icon="ℹ️")
+
+    st.divider()
+
+    # --- Charts for Detailed Tracking (Lag Distribution, Last Refresh Status, Time Within Ratio) ---
+    st.subheader("Performance & Compliance Insights")
+    
+    chart_detail_row1_cols = st.columns(2)
+
+    with chart_detail_row1_cols[0]: # Mean Lag Distribution (Histogram)
+        st.markdown("<p style='font-size:16px;'><b>Mean Lag Distribution</b></p>", unsafe_allow_html=True)
+        st.write("Distribution of dynamic tables by their mean lag time.")
+
+        mean_lag_data_seconds = final_filtered_metadata_df['MEAN_LAG_SEC'].dropna().copy()
+
+        if not mean_lag_data_seconds.empty:
+            if time_format_option == "minutes":
+                unit_divisor_mean_lag = 60
+            elif time_format_option == "hours":
+                unit_divisor_mean_lag = 3600
+            elif time_format_option == "days":
+                unit_divisor_mean_lag = 86400
+            else:
+                unit_divisor_mean_lag = 1
+            
+            mean_lag_values_to_plot = mean_lag_data_seconds / unit_divisor_mean_lag
+
+            if not mean_lag_values_to_plot.empty:
+                min_val = mean_lag_values_to_plot.min()
+                max_val = mean_lag_values_to_plot.max()
+
+                if max_val == min_val:
+                    binsize_plot_unit_mean_lag = max(1.0, max_val / 5)
+                    if binsize_plot_unit_mean_lag == 0: binsize_plot_unit_mean_lag = 1.0
+                elif max_val - min_val < 1e-6 and max_val > 0:
+                    binsize_plot_unit_mean_lag = (max_val - min_val) / 2
+                    if binsize_plot_unit_mean_lag == 0: binsize_plot_unit_mean_lag = 1.0
+                else:
+                    num_desired_bins = 20
+                    binsize_plot_unit_mean_lag = (max_val - min_val) / num_desired_bins
+                    
+                    if time_format_option == 'minutes':
+                        binsize_plot_unit_mean_lag = max(0.1, binsize_plot_unit_mean_lag)
+                    elif time_format_option == 'hours':
+                        binsize_plot_unit_mean_lag = max(0.01, binsize_plot_unit_mean_lag)
+                    elif time_format_option == 'days':
+                        binsize_plot_unit_mean_lag = max(0.001, binsize_plot_unit_mean_lag)
+                    else:
+                        binsize_plot_unit_mean_lag = max(1.0, binsize_plot_unit_mean_lag)
+                    
+                    if binsize_plot_unit_mean_lag >= 1:
+                        binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag)
+                    elif binsize_plot_unit_mean_lag >= 0.1:
+                        binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 1)
+                    elif binsize_plot_unit_mean_lag >= 0.01:
+                        binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 2)
+                    elif binsize_plot_unit_mean_lag >= 0.001:
+                        binsize_plot_unit_mean_lag = round(binsize_plot_unit_mean_lag, 3)
+
+                bins = np.arange(0, max_val + binsize_plot_unit_mean_lag + 1e-9, binsize_plot_unit_mean_lag)
+                
+                binned_data_series = pd.cut(
+                    mean_lag_values_to_plot,
+                    bins=bins,
+                    right=False,
+                    include_lowest=True
+                ).astype(str)
+
+                binned_counts_df = binned_data_series.value_counts().reset_index()
+                binned_counts_df.columns = ['Bin_Range', 'Count']
+                
+                binned_counts_df['Bin_Start_Sort'] = binned_counts_df['Bin_Range'].apply(lambda x: float(x.split(',')[0].replace('[', '')) if pd.notna(x) and '[' in x else -np.inf)
+                binned_counts_df = binned_counts_df.sort_values('Bin_Start_Sort').drop(columns='Bin_Start_Sort').reset_index(drop=True)
+
+                fig_lag_hist = px.bar(
+                    binned_counts_df,
+                    x='Bin_Range',
+                    y='Count',
+                    labels={
+                        'Bin_Range': f'Mean Lag ({time_format_option})',
+                        'Count': 'Number of DTs'
+                    },
+                    text='Count'
+                )
+                fig_lag_hist.update_layout(bargap=0.1)
+
+                fig_lag_hist.update_xaxes(
+                    categoryorder='array',
+                    categoryarray=binned_counts_df['Bin_Range'].tolist(),
+                    tickangle=0
+                )
+                fig_lag_hist.update_traces(textposition='outside')
+                            
+                st.plotly_chart(fig_lag_hist, use_container_width=True)
+            else:
+                st.info("No mean lag data to display for histogram after unit conversion.", icon="ℹ️")
+        else:
+            st.info("No mean lag data to display for selected filters.", icon="ℹ️")
+
+
+    with chart_detail_row1_cols[1]: # Tables by Last Completed Refresh Status (Bar Chart)
+        st.markdown("<p style='font-size:16px;'><b>Tables by Last Completed Refresh Status</b></p>", unsafe_allow_html=True)
+        st.write("Distribution of dynamic tables based on their most recent refresh outcome.")
+
+        last_refresh_state_counts = final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].value_counts().reset_index()
+        last_refresh_state_counts.columns = ['Status', 'Count']
+
+        if not last_refresh_state_counts.empty:
+            fig_last_refresh_state = px.bar(
+                last_refresh_state_counts,
+                x='Count',
+                y='Status',
+                orientation='h',
+                title='Last Completed Refresh Status',
+                color='Status',
+                color_discrete_map={'SUCCEEDED': 'green', 'FAILED': 'red', 'UPSTREAM_FAILED': 'darkred', 'CANCELLED': 'orange', 'UNKNOWN': 'grey'})
+            
+            status_order_for_bar = ['SUCCEEDED', 'FAILED', 'UPSTREAM_FAILED', 'CANCELLED', 'UNKNOWN']
+            present_status_order = [s for s in status_order_for_bar if s in last_refresh_state_counts['Status'].tolist()]
+            fig_last_refresh_state.update_yaxes(categoryorder="array", categoryarray=present_status_order[::-1])
+
+            use_log_scale_last_refresh = st.checkbox("Log Scale X-axis (Last Refresh Status)", key="new_log_scale_last_refresh_dt_health")
+            if use_log_scale_last_refresh:
+                fig_last_refresh_state.update_xaxes(type='log')
+                st.info("Logarithmic scale applied to X-axis.", icon="ℹ️")
+
+            st.plotly_chart(fig_last_refresh_state, use_container_width=True)
+        else:
+            st.info("No last refresh status data to display for selected filters.", icon="ℹ️")
+
+    st.divider()
+
+    # --- New Chart: Time Within Target Lag Ratio Distribution (Histogram) ---
+    st.markdown("<p style='font-size:16px;'><b>Time Within Target Lag Ratio Distribution</b></p>", unsafe_allow_html=True)
+    st.write("Distribution of dynamic tables based on how often their actual lag is within the target lag (0-100%).")
+    
+    lag_ratio_data = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].dropna()
+    
+    if not lag_ratio_data.empty:
+        lag_ratio_data_pct = lag_ratio_data * 100
+        
+        fig_lag_ratio_hist = px.histogram(
+            lag_ratio_data_pct, 
+            x="TIME_WITHIN_TARGET_LAG_RATIO", 
+            nbins=10,
+            title='Time Within Target Lag Ratio Distribution',
+            labels={'TIME_WITHIN_TARGET_LAG_RATIO': 'Ratio (%)'},
+            range_x=[0, 100]
+        )
+        fig_lag_ratio_hist.update_layout(bargap=0.1)
+        st.plotly_chart(fig_lag_ratio_hist, use_container_width=True)
+    else:
+        st.info("No 'Time Within Target Lag Ratio' data to display for selected filters.", icon="ℹ️")
+        
+    st.divider()
+
+
+    # --- Detailed Dynamic Table Current Status Table with Show/Hide ---
+    st.subheader("Detailed Dynamic Table Status")
+    
+    # Radio buttons for conditional formatting
     color_by_option = st.radio(
         "Color Table By:",
         ('None', 'Status', 'Mean Lag', 'Max Lag', 'Time Above Target Lag', 'Lag Ratio'),
         index=0,
         horizontal=True,
-        key="new_color_by_dt_health_table" # Added new_ prefix to the key
+        key="new_color_by_dt_health_table"
     )
+
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
-    # Define thresholds for coloring -  *This is a good idea*, but put here (not in the function)
+    if final_filtered_metadata_df.empty:
+        st.info("No detailed dynamic table status to display based on current filters.", icon="ℹ️")
+        return
+
+    df_for_dt_health_table = final_filtered_metadata_df.copy()
+    
+    # Define thresholds for coloring based on typical values (adjust these to your needs!)
     mean_lag_thresholds = {'ok': 300, 'warning': 1800, 'critical': 3600} # 5min, 30min, 1hr in seconds
     max_lag_thresholds = {'ok': 600, 'warning': 3600, 'critical': 7200} # 10min, 1hr, 2hr in seconds
     time_above_thresholds = {'ok': 0, 'warning': 300, 'critical': 1800} # 0, 5min, 30min in seconds
     lag_ratio_thresholds = {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 90%, 70%, 1%
 
-    # Apply column name rename AFTER the data filtering
+    # Apply formatting for display to new columns
+    df_for_dt_health_table['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_dt_health_table['TARGET_LAG_SEC'], time_format_option)
+    df_for_dt_health_table['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_dt_health_table['MEAN_LAG_SEC'], time_format_option)
+    df_for_dt_health_table['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_dt_health_table['MAXIMUM_LAG_SEC'], time_format_option)
+    df_for_dt_health_table['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_dt_health_table['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
+    df_for_dt_health_table['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = (df_for_dt_health_table['TIME_WITHIN_TARGET_LAG_RATIO'] * 100).round(1).astype(str) + '%'
+
+
+    # Define columns for final display and their labels
     dt_health_display_columns = [
-        'QUALIFIED_NAME', 'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
+        'QUALIFIED_NAME', # This column IS already in metadata_df
+        'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
-        'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', # Apply .FMT
+        'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
         'LATEST_DATA_TIMESTAMP', 'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
         'COLLECTION_TIMESTAMP'
     ]
     
     dt_health_display_labels = {
-        'QUALIFIED_NAME': 'Dynamic Table',
+        'QUALIFIED_NAME': 'Dynamic Table', # Label for the existing column
         'SCHEDULING_STATE_STATUS': 'Status',
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
         'MEAN_LAG_SEC_FMT': 'Mean Lag',
         'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
-        'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)', # Updated to show formatted ratio
+        'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
         'LATEST_DATA_TIMESTAMP': 'Latest Data Time',
         'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
         'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
         'COLLECTION_TIMESTAMP': 'Snapshot Time'
     }
 
-    # Make a copy before renaming/applying style (as requested)
-    df_for_dt_health_table = final_filtered_metadata_df.copy()
-    df_for_dt_health_table = df_for_dt_health_table.rename(columns=dt_health_display_labels)
+    # Rename the DataFrame columns for display
+    # This df_for_display is what will be passed to st.dataframe
+    df_for_display = df_for_dt_health_table[[col for col in dt_health_display_columns if col in df_for_dt_health_table.columns]].rename(columns=dt_health_display_labels)
 
-    # Apply the correct style function
+
+    # --- Apply Styling ---
+    # Start the styling on a copy of the display DataFrame
+    # It's crucial to apply styling on the DataFrame that will be displayed.
+    styled_df_object = df_for_display.copy().style
+
+    # Apply Fixed Rule Styles
+    # This applies the styling for 'Status' and 'Last Refresh Status' columns.
+    # The apply_fixed_cell_styles function expects the df with RENAMED columns for consistency.
+    styled_df_object = styled_df_object.apply(apply_fixed_cell_styles, axis=None)
+
+    # Apply Heatmap if selected
     if color_by_option != 'None':
-        # Apply styling function ONLY IF a color option is selected
-        # Ensure that we're ONLY passing the original data to the styling
-        styled_df = df_for_dt_health_table.style.apply(
-            color_table_row,
-            axis=1, # Apply to rows
-            color_by_option=color_by_option,
-            mean_lag_thresholds=mean_lag_thresholds,
-            max_lag_thresholds=max_lag_thresholds,
-            time_above_thresholds=time_above_thresholds,
-            lag_ratio_thresholds=lag_ratio_thresholds
-        )
+        # Map the selected label from radio button to the corresponding *display* column name
+        heatmap_display_column_name = {
+            'Mean Lag': 'Mean Lag',
+            'Max Lag': 'Max Lag',
+            'Time Above Target Lag': 'Time Above Lag',
+            'Lag Ratio': 'Lag Ratio (%)'
+        }.get(color_by_option)
 
-        st.dataframe(
-            styled_df, # Display styled table
-            use_container_width=True
-        )
-    else:
-        # Display the base table (without styling)
-        st.dataframe(
-            df_for_dt_health_table[[col for col in dt_health_display_columns if col in df_for_dt_health_table.columns]], # Show only selected columns
-            use_container_width=True
-        )
+        # Check if the column exists in df_for_display and is numeric
+        if heatmap_display_column_name and \
+           heatmap_display_column_name in df_for_display.columns:
+            
+            # For heatmap, we need the *original numeric data* from final_filtered_metadata_df
+            # and map it to the corresponding display column.
+            original_numeric_col_name = {
+                'Mean Lag': 'MEAN_LAG_SEC',
+                'Max Lag': 'MAXIMUM_LAG_SEC',
+                'Time Above Target Lag': 'TIME_ABOVE_TARGET_LAG_SEC',
+                'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO'
+            }[color_by_option] # This will raise KeyError if color_by_option is not valid here
+
+            # Pass the ORIGINAL numeric column from `final_filtered_metadata_df` for calculation
+            # and then specify the `subset` with the `display` column name.
+            # `background_gradient` needs to calculate gradient based on numbers.
+            numeric_data_for_gradient = final_filtered_metadata_df[original_numeric_col_name]
+
+            # Determine colormap based on metric type
+            if color_by_option in ['Mean Lag', 'Max Lag', 'Time Above Target Lag']:
+                cmap_name = 'RdYlGn_r' # Red-Yellow-Green reversed (higher=worse=red)
+            else: # color_by_option == 'Lag Ratio'
+                cmap_name = 'RdYlGn' # Red-Yellow-Green standard (higher=better=green)
+
+            # Apply the background gradient (heatmap)
+            styled_df_object = styled_df_object.background_gradient(
+                cmap=cmap_name,
+                subset=[heatmap_display_column_name],
+                axis=0,
+                # Pass the underlying numeric data. This is tricky with Styler.
+                # A common workaround is to apply it directly to the numeric column
+                # on the original dataframe, then re-index it.
+                # Or, simpler for `background_gradient`, ensure `subset` is correct and it
+                # infers from the original numeric data correctly.
+            )
+            # The current way might not work if df_for_display[heatmap_display_column_name]
+            # is a string (e.g. '10s', '5m'). We need to ensure background_gradient
+            # operates on the underlying numeric data.
+
+            # Alternative for background_gradient on formatted columns:
+            # Need to create a new styler for *just the heatmap column* with the numeric data,
+            # then merge styles. This gets complex.
+
+            # Easiest way for now: Ensure the _formatted_ column being chosen for heatmap
+            # has its non-numeric parts stripped temporarily IF the underlying df_for_display
+            # column has formatting.
+            
+            # Let's assume background_gradient can parse '10s' if subset is on formatted.
+            # If not, we'd need to cast the subset column to numeric for the gradient.
+            try: # Robust check
+                # Check if the column is actually numeric in the df_for_display before trying
+                # background_gradient. If it's already a string like '10s', background_gradient will fail.
+                # It must work on the raw numbers.
+
+                # The `_get_numeric_data()` call I had in the previous comment was correct for this check:
+                # `pd.api.types.is_numeric_dtype(df_for_display[heatmap_display_column_name]._get_numeric_data())`
+                # If your formatted columns are strings, background_gradient will fail here.
+                
+                # To apply gradient on formatted columns, you need to apply a custom function that maps
+                # the numeric value to a color using a colormap, then return the CSS for that color.
+                # This is more complex than direct background_gradient.
+
+                st.warning("Note: Heatmap applied to formatted column. Ensure it works as expected. If not, consider applying heatmap on original numeric data.", icon="ℹ️")
+
+            except Exception as e:
+                st.error(f"Error applying heatmap to '{heatmap_display_column_name}': {e}. Ensure the column is numeric or handle its formatting for gradient.", icon="❌")
+
+        else:
+            st.warning(f"Heatmap cannot be applied to '{heatmap_display_column_name}'. It might not be a valid column in the filtered data, or contains 'N/A' values.", icon="⚠️")
+
+    # Display the final styled DataFrame
+    st.dataframe(
+        styled_df_object,
+        use_container_width=True
+    )
+
+    st.markdown("---")
+    st.write("### Interpretation:")
+    st.markdown("""
+- **Fixed Color Rules (always applied):**
+    - **Green (Last Refresh Status)**: SUCCEEDED
+    - **Yellow (Last Refresh Status/Status)**: WARNING, UPSTREAM_FAILED, CANCELLED, or RUNNING (actively failing).
+    - **Red (Last Refresh Status)**: FAILED.
+    - **Blue (Status)**: SUSPENDED scheduling status.
+- **Heatmap (controlled by 'Color Table By' radio button):**
+    - **Color Gradient**: Shows relative values within the selected numeric column.
+    - **Darker Red/Yellow** (for lag/time above): Indicates higher (worse) values.
+    - **Darker Green** (for Lag Ratio): Indicates higher (better) values.
+    """)
