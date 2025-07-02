@@ -31,7 +31,7 @@ def format_seconds_to_readable(seconds_series, format_type):
             if s == 0: return "0s"
 
             days = int(s // 86400)
-            hours = int((s % 86640) // 3600) # Fix: (s % 86400) was wrong, it's (s % 86400) // 3600
+            hours = int((s % 86400) // 3600) # Corrected modulo for hours calculation
             minutes = int((s % 3600) // 60)
             seconds = s % 60
             
@@ -48,45 +48,13 @@ def format_seconds_to_readable(seconds_series, format_type):
     return numeric_series.astype(str) # Fallback to string if type is unknown
 
 
-# --- Helper function to format timestamp to "X days/hours ago" ---
-def format_timestamp_to_time_ago(timestamp_series):
-    if timestamp_series.empty:
-        return pd.Series(["N/A"] * len(timestamp_series), index=timestamp_series.index)
-
-    current_time = datetime.now()
-
-    def format_single_timestamp(ts):
-        if pd.isna(ts) or ts is None or ts == pd.NaT:
-            return "N/A"
-        
-        # Ensure ts is a datetime object
-        if not isinstance(ts, pd.Timestamp):
-            try:
-                ts_dt = pd.to_datetime(ts, errors='coerce')
-                if pd.isna(ts_dt): return "Invalid Timestamp"
-            except ValueError:
-                return "Invalid Timestamp"
-        else:
-            ts_dt = ts
-            
-        time_diff = current_time - ts_dt
-        
-        if time_diff < timedelta(minutes=1):
-            return "Just now"
-        elif time_diff < timedelta(hours=1):
-            minutes = int(time_diff.total_seconds() // 60)
-            return f"{minutes}m ago"
-        elif time_diff < timedelta(days=1):
-            hours = int(time_diff.total_seconds() // 3600)
-            return f"{hours}h ago"
-        elif time_diff < timedelta(days=30):
-            days = int(time_diff.total_seconds() // 86400)
-            return f"{days}d ago"
-        else:
-            # For older data, just return the date or original string
-            return ts_dt.strftime('%Y-%m-%d')
-
-    return timestamp_series.apply(format_single_timestamp)
+# --- Helper function for Legend text formatting (scalar value) ---
+# This is a specialized helper for generating legend text like "1 day", "3 days"
+# It should NOT be used for formatting the DataFrame column itself.
+def format_stale_days_for_legend(days_value):
+    if pd.isna(days_value): return "N/A"
+    if days_value == 1: return "1 day"
+    return f"{int(days_value)} days"
 
 
 # --- Define Global Colors for Row Styling ---
@@ -140,8 +108,6 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
 
     elif color_by_option == 'Lag Ratio':
         ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        # Here, `ratio` should already be a float (0.0 for NaNs after fillna).
-        # We don't need to check for pd.isna here, as it's handled upstream.
         if ratio < thresholds['lag_ratio']['critical']: # This is 0.01
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
         elif ratio < thresholds['lag_ratio']['warning']: # This is 0.70
@@ -194,15 +160,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             if col.endswith('_SEC') or col.endswith('_RATIO'):
                 metadata_df[col] = np.nan
             elif col.endswith('_TIMESTAMP'): 
-                 metadata_df[col] = pd.NaT # Not a Time (NaN for datetime)
+                 metadata_df[col] = pd.NaT 
             else:
                 metadata_df[col] = 'UNKNOWN'
     
     for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TARGET_LAG_SEC']:
         metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
     
-    # IMPORTANT FIX: Fill NaNs in TIME_WITHIN_TARGET_LAG_RATIO with 0 BEFORE filtering/copying
-    # This ensures apply_row_style always gets a numeric value for comparison.
     metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
 
     # Convert LATEST_DATA_TIMESTAMP to datetime objects for accurate comparison
@@ -280,7 +244,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     # --- Apply Filters to Main DataFrame (re-filter based on user selections) ---
-    # Apply filters to the already pre-processed metadata_df
     if selected_database_dt_health != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
@@ -337,7 +300,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
         'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
         'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, # Ensure 0.01 is correctly interpreted as 1.0%
+        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
         'latest_data_time': {'ok': 1, 'warning': 3, 'critical': 7}
     }
     legend_thresholds = thresholds_for_styling 
@@ -357,7 +320,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         
         def format_legend_value_ratio(val_raw):
             if pd.isna(val_raw): return "N/A"
-            return f"{round(val_raw * 100, 1)}%" # Format as percentage for legend
+            return f"{round(val_raw * 100, 1)}%"
         
         critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
         warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
@@ -371,14 +334,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     elif color_by_option == 'Latest Data Time':
         threshold_set = legend_thresholds['latest_data_time'] 
         
-        def format_legend_value_days(val_raw):
-            if pd.isna(val_raw): return "N/A"
-            if val_raw == 1: return "1 day"
-            return f"{int(val_raw)} days"
-        
-        critical_val_fmt = format_legend_value_days(threshold_set['critical'])
-        warning_val_fmt = format_legend_value_days(threshold_set['warning'])
-        ok_val_fmt = format_legend_value_days(threshold_set['ok'])
+        critical_val_fmt = format_stale_days_for_legend(threshold_set['critical'])
+        warning_val_fmt = format_stale_days_for_legend(threshold_set['warning'])
+        ok_val_fmt = format_stale_days_for_legend(threshold_set['ok'])
 
         legend_content = f"""
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (>= {critical_val_fmt})</div>
@@ -406,14 +364,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # Use a copy for display formatting
     df_for_display = final_filtered_metadata_df.copy()
     
-    # Apply formatting for display to new columns BEFORE sorting
+    # Apply formatting for display to new columns
     df_for_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TARGET_LAG_SEC'], time_format_option)
     df_for_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MEAN_LAG_SEC'], time_format_option)
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
-    # This `_FMT` column will correctly display 0.0% because the original `TIME_WITHIN_TARGET_LAG_RATIO` was filled with 0.0
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
-    df_for_display['LATEST_DATA_TIMESTAMP_FMT'] = format_timestamp_to_time_ago(df_for_display['LATEST_DATA_TIMESTAMP'])
+    # REMOVED df_for_display['LATEST_DATA_TIMESTAMP_FMT'] and will use raw LATEST_DATA_TIMESTAMP below
 
 
     # Define display columns and their labels
@@ -422,7 +379,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
-        'LATEST_DATA_TIMESTAMP_FMT', 
+        'LATEST_DATA_TIMESTAMP', # Use the original timestamp column directly
         'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
         'COLLECTION_TIMESTAMP'
     ]
@@ -436,13 +393,15 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
         'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
-        'LATEST_DATA_TIMESTAMP_FMT': 'Latest Data Time', 
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', # Changed label back to just "Latest Data Time"
         'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
         'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
         'COLLECTION_TIMESTAMP': 'Snapshot Time'
     }
 
     # Select and rename columns for the display DataFrame
+    # Ensure all columns in dt_health_display_columns_order exist in df_for_display before selecting
+    # And specifically rename 'LATEST_DATA_TIMESTAMP' without a '_FMT' suffix
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
 
 
@@ -459,12 +418,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     if sort_column_original_name:
         if sort_column_original_name == 'TIME_WITHIN_TARGET_LAG_RATIO': 
-            sort_order_indices = final_filtered_metadata_df.sort_values( # Use original for sort logic
+            sort_order_indices = final_filtered_metadata_df.sort_values( 
                 by='TIME_WITHIN_TARGET_LAG_RATIO', ascending=False, na_position='last' 
             ).index
             final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
         elif sort_column_original_name == 'LATEST_DATA_TIMESTAMP':
-             sort_order_indices = final_filtered_metadata_df.sort_values( # Use original for sort logic
+             sort_order_indices = final_filtered_metadata_df.sort_values( 
                 by='LATEST_DATA_TIMESTAMP', ascending=False, na_position='last' 
             ).index
              final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
@@ -500,7 +459,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 row_display,             
                 color_by_option,         
                 thresholds_for_styling,  
-                final_filtered_metadata_df # Pass original data for lookup
+                final_filtered_metadata_df 
             ), 
             axis=1 
         )
