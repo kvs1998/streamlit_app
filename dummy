@@ -50,6 +50,7 @@ def apply_row_style(row_display_data, row_original_data, color_by_option, thresh
     Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
     - row_display_data: A row from the DataFrame being styled, with display labels.
     - row_original_data: A corresponding row from the original filtered_metadata_df, with original column names and numeric values.
+    - time_format_option: Passed for consistency, though not directly used for coloring here.
     """
     style_str = '' # Default to empty string, will be set to good if no other condition met
 
@@ -58,11 +59,11 @@ def apply_row_style(row_display_data, row_original_data, color_by_option, thresh
         last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
         if status == 'SUSPENDED':
             style_str = f'background-color: {BG_COLOR_INFO}'
-        elif last_refresh_state == 'FAILED':
+        elif last_refresh_state == 'FAILED': # Failed is critical regardless of RUNNING status
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
+        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']: # These are warnings
             style_str = f'background-color: {BG_COLOR_WARNING}'
-        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
+        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED': # Healthy running
             style_str = f'background-color: {BG_COLOR_GOOD}'
         else: # Default for statuses not explicitly colored (e.g., unknown, or running but not succeeded/failed/warned)
             style_str = f'background-color: {BG_COLOR_GOOD}' # Default to good/unmarked if no specific issue
@@ -95,10 +96,10 @@ def apply_row_style(row_display_data, row_original_data, color_by_option, thresh
             style_str = '' # Keep white/no color for NaN values
         elif time_above > thresholds['time_above']['critical']:
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif time_above > thresholds['time_above']['warning']:
-            style_str = f'background-color: {BG_COLOR_WARNING}'
-        else:
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+            elif time_above > thresholds['time_above']['warning']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Lag Ratio':
         ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
@@ -226,10 +227,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         return
 
 
-    # --- KPI Section (Simplified, no charts) ---
+    # --- KPI Section ---
     st.subheader("Dynamic Table Health Summary")
     
-    # Calculate KPIs (remain the same)
     total_dt_monitored = final_filtered_metadata_df['QUALIFIED_NAME'].nunique()
     running_dt_count = final_filtered_metadata_df[
         (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'RUNNING') & 
@@ -261,7 +261,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         st.metric("Avg Mean Lag", avg_mean_lag_fmt)
         st.metric("Max Lag", max_lag_fmt)
 
-    st.divider() # Use a divider to separate KPIs from the table
+    st.divider()
 
     # --- Detailed Dynamic Table Current Status Table ---
     st.subheader("Detailed Dynamic Table Status")
@@ -275,7 +275,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         key="new_color_by_dt_health_table"
     )
 
-    # --- Dynamic Severity Legend Section (NEW) ---
+    # --- Dynamic Severity Legend Section ---
     st.markdown("""
         <style>
         .legend-item {
@@ -315,14 +315,20 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         }.get(color_by_option)
 
         if col_name_for_threshold:
-            threshold_set = thresholds[col_name_for_threshold]
+            threshold_set = { # RE-DEFINED THRESHOLDS FOR LEGEND GENERATION, ADJUST AS NEEDED
+                'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
+                'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds
+                'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds
+                'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 0-1 ratio
+            }[col_name_for_threshold]
             
-            # Formatting values for legend display
-            def format_legend_value(val_sec, col_type):
+            # Helper for formatting values in legend
+            def format_legend_value(val_raw, col_type):
                 if col_type == 'Lag Ratio':
-                    return f"{round(val_sec * 100, 1)}%"
-                else: # Lag in seconds
-                    return format_seconds_to_readable(pd.Series([val_sec]), time_format_option).iloc[0]
+                    return f"{round(val_raw * 100, 1)}%"
+                else: # Lag in seconds, use main format_seconds_to_readable
+                    # For format_seconds_to_readable, convert single value to Series
+                    return format_seconds_to_readable(pd.Series([val_raw]), time_format_option).iloc[0]
             
             critical_val_fmt = format_legend_value(threshold_set['critical'], color_by_option)
             warning_val_fmt = format_legend_value(threshold_set['warning'], color_by_option)
@@ -376,9 +382,10 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     
-    # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO_FMT to be 0% for display
-    # Fill NaN before applying string formatting
-    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
+    # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
+    # This also applies to the underlying numeric data if it's used for sorting/thresholds.
+    final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0)
+    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = (df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'] * 100).round(1).astype(str) + '%'
 
 
     # Define display columns and their labels
@@ -394,7 +401,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     dt_health_display_labels = {
         'QUALIFIED_NAME': 'Dynamic Table',
         'SCHEDULING_STATE_STATUS': 'Status',
-        'SCHEDING_STATE_REASON_MESSAGE': 'Reason',
+        'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
         'MEAN_LAG_SEC_FMT': 'Mean Lag',
         'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
@@ -426,7 +433,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     if sort_column_original_name:
         if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns directly
-            ascending = True if color_by_option == 'Lag Ratio' else False
+            ascending = True if color_by_option == 'Lag Ratio' else False # Lag Ratio: lower is worse, so sort ASC. Others: DESC.
             
             sort_order_indices = final_filtered_metadata_df.sort_values(
                 by=sort_column_original_name, ascending=ascending, na_position='last'
@@ -440,8 +447,8 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 'UPSTREAM_FAILED': 2,
                 'CANCELLED': 3,
                 'WARNING': 4,
-                'RUNNING': 5, # Lower severity, if not also failing
-                'SUCCEEDED': 6, # Lowest severity
+                'RUNNING': 5,
+                'SUCCEEDED': 6,
                 'UNKNOWN': 7
             }
             # Add temporary sort keys on the original data (which aligns by index)
@@ -470,12 +477,10 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 row_display, # Pass the row from the display DataFrame (has display labels)
                 # Find the corresponding row from the ORIGINAL final_filtered_metadata_df
                 # Use the 'Dynamic Table' column (which holds original QUALIFIED_NAME) to find it.
-                # Ensure the lookup handles potential mismatches gracefully.
-                final_filtered_metadata_df[final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']].iloc[0] 
-                    if 'Dynamic Table' in row_display and row_display['Dynamic Table'] in final_filtered_metadata_df['QUALIFIED_NAME'].values 
-                    else pd.Series(), # Fallback to empty Series if not found (shouldn't happen with correct filtering)
+                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(), # Use original index for lookup
                 color_by_option,
-                thresholds
+                thresholds,
+                time_format_option # Pass time_format_option
             ), 
             axis=1 # Apply row-wise
         )
