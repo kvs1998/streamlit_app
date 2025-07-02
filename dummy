@@ -39,34 +39,40 @@ def format_seconds_to_readable(seconds_series, format_type):
 # --- Define Global Colors for Row Styling ---
 BG_COLOR_GOOD = '#ccffcc' # Light Green
 BG_COLOR_WARNING = '#ffe0b3' # Light Orange
-BG_COLOR_CRITICAL = '#ffcccc' # Light Red
+BG_COLOR_CRITICAL = '#f8d7da' # Light Red
 BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
-# Helper function for ROW-WISE conditional formatting
+# Helper function for ROW-WISE conditional formatting (moved to global scope)
+# This function is called by df.style.apply(axis=1), so 'row' is a pandas Series representing one row
+# of the DataFrame *being styled* (final_df_for_display_sorted).
+# It needs `original_df_metadata` to lookup original numeric values using QUALIFIED_NAME.
 def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time_format_option):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
-    - row: A row from the DataFrame being styled, with display labels.
+    - row: A row from the DataFrame being styled (final_df_for_display_sorted), with display labels.
     - color_by_option, thresholds, original_df_metadata, time_format_option: Passed as args from lambda.
     """
     # Lookup the corresponding row from the original metadata_df using the 'Dynamic Table' column (QUALIFIED_NAME).
-    # This column holds the original QUALIFIED_NAME even after reordering of rows in display_df.
-    original_qualified_name = row.get('Dynamic Table') # Get the QUALIFIED_NAME from the DISPLAY row
-
+    # 'Dynamic Table' is the display label for 'QUALIFIED_NAME'
+    original_qualified_name_from_display_row = row.get('Dynamic Table')
+    
     row_original_data = pd.Series(dtype='object') # Default to empty Series
-
-    # --- FIX: Robust lookup of original row based on QUALIFIED_NAME ---
-    if original_qualified_name and original_qualified_name in original_df_metadata['QUALIFIED_NAME'].values:
-        # Find the row in the original metadata_df that matches this QUALIFIED_NAME
-        # Use .iloc[0] because the filter might return a DataFrame with one row, not a Series directly.
+    
+    # --- FIX: Robust lookup of original row by QUALIFIED_NAME ---
+    # This ensures we get the row from original_df_metadata based on the unique identifier (QUALIFIED_NAME).
+    if original_qualified_name_from_display_row and \
+       'QUALIFIED_NAME' in original_df_metadata.columns and \
+       original_qualified_name_from_display_row in original_df_metadata['QUALIFIED_NAME'].values:
+        
+        # Use boolean indexing to find the row, then .iloc[0] to get the Series
         row_original_data = original_df_metadata[
-            original_df_metadata['QUALIFIED_NAME'] == original_qualified_name
+            original_df_metadata['QUALIFIED_NAME'] == original_qualified_name_from_display_row
         ].iloc[0]
     # --- END FIX ---
 
-    style_str = BG_COLOR_NONE
+    style_str = BG_COLOR_NONE # Default to white/no color
 
     if row_original_data.empty: # If lookup failed or original data is empty, keep default white
         pass 
@@ -83,7 +89,7 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
         elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
             style_str = f'background-color: {BG_COLOR_GOOD}'
         else:
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+            style_str = f'background-color: {BG_COLOR_GOOD}' # Default for other statuses
 
     elif color_by_option == 'Mean Lag':
         lag = row_original_data.get('MEAN_LAG_SEC')
@@ -129,7 +135,6 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    # Return a Series of style strings with the exact column index of the DataFrame being styled (row.index)
     return pd.Series(style_str, index=row.index)
 
 
@@ -141,17 +146,36 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         st.info("No metadata available for DT HEALTH tab. Check data source or collection.", icon="ℹ️")
         return
 
-    # Ensure all required numeric columns are present and numeric
-    required_numeric_cols = ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC']
-    for col in required_numeric_cols:
+    # --- FIX: Ensure 'QUALIFIED_NAME' and related columns are present and properly formatted for use ---
+    # This is CRUCIAL as it's the source of truth for lookups in apply_row_style
+    if 'QUALIFIED_NAME' not in metadata_df.columns:
+        st.error("Error: 'QUALIFIED_NAME' column missing in metadata_df. Cannot proceed with DT Health tab.", icon="❌")
+        return # Exit if critical column is missing
+    metadata_df['QUALIFIED_NAME'] = metadata_df['QUALIFIED_NAME'].astype(str).str.upper()
+
+    # Ensure other required columns for original_df_metadata lookup are also there
+    required_cols_for_lookup = [
+        'DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', # For filtering later
+        'SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE', # For 'Status' coloring
+        'MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC' # For numeric coloring
+    ]
+    for col in required_cols_for_lookup:
         if col not in metadata_df.columns:
-            metadata_df[col] = np.nan
+            st.warning(f"Warning: Column '{col}' missing in metadata_df. Initializing with NaNs/Defaults for safety.", icon="⚠️")
+            if col.endswith('_SEC') or col.endswith('_RATIO'):
+                metadata_df[col] = np.nan
+            else:
+                metadata_df[col] = 'UNKNOWN' # Default for categorical missing values
+    
+    # And convert numeric columns AFTER ensuring they exist
+    for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC']:
         metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
 
 
-    # --- Direct use of metadata_df as the filtered_metadata_df ---
-    filtered_metadata_df = metadata_df.copy() 
-
+    # --- filtered_metadata_df is the cleaned, original-column-named source of truth ---
+    # It will be passed as `original_df_metadata` to apply_row_style.
+    filtered_metadata_df = metadata_df.copy() # Operate on a copy
+    
     if filtered_metadata_df.empty:
         st.info("No Dynamic Table data available. Please adjust your filters or check data source.", icon="ℹ️")
         return
@@ -344,7 +368,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             
             # Helper for formatting values in legend
             def format_legend_value_for_display(val_raw, col_type, t_format_option):
-                if pd.isna(val_raw): return "N/A" # Handle NaN values for legend display
+                if pd.isna(val_raw): return "N/A"
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
                 else: # Lag in seconds, use main format_seconds_to_readable
@@ -488,13 +512,18 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
+        # Apply row-wise style using lambda, passing necessary arguments.
+        # This lambda ensures apply_row_style gets the original data for checks.
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                row_display, # Pass the row from the display DataFrame (has display labels)
-                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(dtype='object'), # Pass original row via index lookup
+                row_display,
+                # Lookup the original row by its unique QUALIFIED_NAME value (from 'Dynamic Table' display column)
+                final_filtered_metadata_df.loc[
+                    final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']
+                ].iloc[0] if row_display['Dynamic Table'] in final_filtered_metadata_df['QUALIFIED_NAME'].values else pd.Series(dtype='object'),
                 color_by_option,
-                thresholds_for_styling, # Pass the specific thresholds for styling
-                time_format_option # Pass time_format_option
+                thresholds_for_styling,
+                time_format_option
             ), 
             axis=1 # Apply row-wise
         )
