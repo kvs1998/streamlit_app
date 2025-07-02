@@ -258,42 +258,58 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Detailed Dynamic Table Current Status Table Section ---
     
-    # 1. Arrange Title and Radio Buttons
-    # Adjust widths as needed. 0.7 for title, 0.3 for radio buttons might work.
-    title_row_cols = st.columns([0.7, 0.3]) 
-    with title_row_cols[0]:
-        st.subheader("Detailed Dynamic Table Status")
+    # 1. Arrange Title and Radio Buttons:
+    # Use st.container() for cleaner separation if needed, or directly in columns
+    # st.subheader is already a block element, radio button as horizontal takes little space
+    title_and_radio_cols = st.columns([0.5, 0.5]) # Adjust width as needed
+
+    with title_and_radio_cols[0]:
+        # Removed st.subheader("Detailed Dynamic Table Status") from here, 
+        # as it's directly above within the main content flow.
+        st.write("### Detailed Dynamic Table Status") # Using smaller markdown header for compactness
     
-    with title_row_cols[1]:
+    with title_and_radio_cols[1]:
+        # Radio buttons are already horizontal with label "Color Table By:"
         color_by_option = st.radio(
             "Color Table By:",
             ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
             index=0,
-            horizontal=True, # Keep horizontal for compactness
+            horizontal=True, 
             key="new_color_by_dt_health_table"
         )
 
     # 2. Dynamic Severity Legend Section (Moved and placed in a column with simplified HTML)
-    # Define custom CSS for the legend items (moved here for encapsulation)
+    # Define custom CSS for the legend items
     st.markdown("""
         <style>
-        .legend-container {
+        /* Base container for the whole legend row */
+        .legend-row-container {
             display: flex;
-            flex-direction: column; /* Stack "Severity:" on top of items */
-            align-items: flex-end; /* Align container content to the right */
-            width: 100%; /* Take full width of its column */
+            justify-content: flex-end; /* Push content to the right */
+            align-items: center; /* Vertically center items */
+            width: 100%; /* Take full width */
+            margin-bottom: 10px; /* Space above table */
         }
+        /* Style for the "Severity:" label */
+        .legend-label {
+            font-weight: bold;
+            font-size: 16px;
+            margin-right: 10px;
+            white-space: nowrap; /* Prevent "Severity:" from wrapping */
+        }
+        /* Wrapper for the color boxes and text */
         .legend-items-wrapper {
             display: flex;
-            flex-wrap: wrap; /* Allow items to wrap */
-            justify-content: flex-end; /* Align individual items to the right */
-            margin-top: 5px; /* Space between "Severity:" and items */
+            flex-wrap: wrap; /* Allow items to wrap if screen is too small */
+            justify-content: flex-end; /* Keep items aligned to the right */
         }
+        /* Individual legend item style */
         .legend-item {
-            display: inline-flex; /* Use inline-flex for color box and text alignment */
-            align-items: center; /* Vertically align items */
+            display: inline-flex; /* Use inline-flex to keep color box and text together */
+            align-items: center; /* Vertically align content */
             margin-left: 15px; /* Space between legend items */
             font-size: 14px;
+            white-space: nowrap; /* Prevent individual legend items from wrapping text */
         }
         .color-box {
             width: 15px;
@@ -318,13 +334,11 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     }
     legend_thresholds = thresholds_for_styling 
 
-    legend_items_html = [] # Will build a list of individual legend item HTML strings
+    legend_items_html = [] 
     
     if color_by_option == 'None':
-        # No legend if no coloring selected
         pass 
     elif color_by_option == 'Status':
-        # Aligning legend colors: Critical (Red) -> Warning (Orange) -> Good (Green)
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</span>")
@@ -339,7 +353,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
         ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
 
-        # Aligned legend colors: Critical (Red) -> Warning (Orange) -> Good (Green)
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</span>")
@@ -350,26 +363,21 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         critical_text = format_stale_days_for_legend(critical_val_days)
         warning_text = format_stale_days_for_legend(warning_val_days)
 
-        # Aligned legend colors: Critical (Red) -> Warning (Orange) -> Good (Green)
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old</span>")
         legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old</span>")
         
-    # Place legend to the right of the table description
-    # Adjust column widths to push it right: e.g., 0.6 for spacer, 0.4 for content
-    legend_cols = st.columns([0.6, 0.4]) 
-    with legend_cols[1]: # Use the right column for the legend content
-        if legend_items_html: # Only render if there's content
-            st.markdown(
-                f"""
-                <div class='legend-container'>
-                    <span style='font-weight: bold; font-size: 16px; margin-bottom: 5px;'>Severity:</span>
-                    <div class='legend-items-wrapper'>
-                        {"".join(legend_items_html)}
-                    </div>
+    if legend_items_html: # Only render if there's content
+        st.markdown(
+            f"""
+            <div class='legend-row-container'>
+                <span class='legend-label'>Severity:</span>
+                <div class='legend-items-wrapper'>
+                    {"".join(legend_items_html)}
                 </div>
-                """, unsafe_allow_html=True
-            )
+            </div>
+            """, unsafe_allow_html=True
+        )
     
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
