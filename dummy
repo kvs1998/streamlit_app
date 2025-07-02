@@ -2,8 +2,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# plotly.express is not used in this simplified version, can be removed if not used elsewhere.
-# import plotly.express as px
 
 # --- Helper function to convert seconds to a more readable format ---
 def format_seconds_to_readable(seconds_series, format_type):
@@ -47,18 +45,16 @@ BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
 # Helper function for ROW-WISE conditional formatting
-def apply_row_style(row_display_data, row_original_data, color_by_option, thresholds):
+# --- FIX: Added time_format_option to function signature ---
+def apply_row_style(row_display_data, row_original_data, color_by_option, thresholds, time_format_option):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
     Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
     - row_display_data: A row from the DataFrame being styled, with display labels.
     - row_original_data: A corresponding row from the original filtered_metadata_df, with original column names and numeric values.
+    - time_format_option: Passed for consistency in case it was needed for formatting within style logic.
     """
     style_str = BG_COLOR_NONE # Default to white (no explicit color)
-
-    # If the row_original_data is empty (e.g., from a .get() that failed),
-    # or if the relevant numeric data is NaN, don't color.
-    # This also covers the case where original data might not be found.
 
     if color_by_option == 'Status':
         status = row_original_data.get('SCHEDULING_STATE_STATUS')
@@ -66,7 +62,7 @@ def apply_row_style(row_display_data, row_original_data, color_by_option, thresh
 
         if status == 'SUSPENDED':
             style_str = f'background-color: {BG_COLOR_INFO}' # Informational state
-        elif last_refresh_state == 'FAILED':
+        elif last_refresh_state == 'FAILED': # Failed is critical regardless of RUNNING status
             style_str = f'background-color: {BG_COLOR_CRITICAL}' # Critical failure
         elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
             style_str = f'background-color: {BG_COLOR_WARNING}' # Warning states
@@ -101,7 +97,7 @@ def apply_row_style(row_display_data, row_original_data, color_by_option, thresh
         time_above = row_original_data.get('TIME_ABOVE_TARGET_LAG_SEC')
         if pd.isna(time_above):
             style_str = f'background-color: {BG_COLOR_NONE}' # Explicitly white for NaN
-        elif time_above > thresholds['time_above']['critical']: # Use '>' for greater than for consistency with previous critical > warning
+        elif time_above > thresholds['time_above']['critical']:
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
         elif time_above > thresholds['time_above']['warning']:
             style_str = f'background-color: {BG_COLOR_WARNING}'
@@ -285,7 +281,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         key="new_color_by_dt_health_table"
     )
 
-    # --- Dynamic Severity Legend Section (NEW) ---
+    # --- Dynamic Severity Legend Section ---
     st.markdown("""
         <style>
         .legend-item {
@@ -336,15 +332,15 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             threshold_set = legend_thresholds[col_key] # Use the re-defined thresholds
             
             # Helper for formatting values in legend
-            def format_legend_value(val_raw, col_type, t_format_option): # Pass time_format_option
+            def format_legend_value_for_display(val_raw, col_type, t_format_option): # Pass time_format_option
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
                 else: # Lag in seconds, use main format_seconds_to_readable
                     return format_seconds_to_readable(pd.Series([val_raw]), t_format_option).iloc[0]
             
-            critical_val_fmt = format_legend_value(threshold_set['critical'], color_by_option, time_format_option)
-            warning_val_fmt = format_legend_value(threshold_set['warning'], color_by_option, time_format_option)
-            ok_val_fmt = format_legend_value(threshold_set['ok'], color_by_option, time_format_option)
+            critical_val_fmt = format_legend_value_for_display(threshold_set['critical'], color_by_option, time_format_option)
+            warning_val_fmt = format_legend_value_for_display(threshold_set['warning'], color_by_option, time_format_option)
+            ok_val_fmt = format_legend_value_for_display(threshold_set['ok'], color_by_option, time_format_option)
 
             if color_by_option in ['Mean Lag', 'Max Lag', 'Time Above Target Lag']:
                 # Higher values are worse (Red > Yellow > Green)
@@ -394,9 +390,8 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     
-    # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% BEFORE display formatting
-    # This ensures consistency in both formatting and threshold checks.
-    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
+    # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
+    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
 
 
     # Define display columns and their labels
@@ -487,7 +482,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(), # Pass original row via index lookup
                 color_by_option,
                 thresholds_for_styling, # Pass the specific thresholds for styling
-                time_format_option # Pass time_format_option for consistency
+                time_format_option # Pass time_format_option
             ), 
             axis=1 # Apply row-wise
         )
