@@ -5,12 +5,18 @@ import numpy as np
 
 # --- Helper function to convert seconds to a more readable format ---
 def format_seconds_to_readable(seconds_series, format_type):
+    # Handle cases where the series might be empty or all NaN
+    if seconds_series.empty or pd.isna(seconds_series).all():
+        # Ensure it returns a series of "N/A" for consistency if input is series
+        if isinstance(seconds_series, pd.Series):
+            return pd.Series(["N/A"] * len(seconds_series), index=seconds_series.index)
+        else: # For single NaN values passed as scalar
+            return "N/A"
+
     if format_type == "seconds":
         return seconds_series.round(1).astype(str) + "s"
     elif format_type == "minutes":
         return (seconds_series / 60).round(1).astype(str) + "m"
-    elif format_series.empty or pd.isna(seconds_series).all():
-        return pd.Series(["N/A"] * len(seconds_series))
     elif format_type == "hours":
         return (seconds_series / 3600).round(1).astype(str) + "h"
     elif format_type == "days":
@@ -135,7 +141,7 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    return pd.Series(style_str, index=row_from_display_df.index) # Return Series with same index as input row
+    return pd.Series(style_str, index=row_from_display_df.index)
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -262,19 +268,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         return
 
 
-    # --- REMOVED KPI Section as requested ---
-    # st.subheader("Dynamic Table Health Summary")
-    # ... (removed KPI metrics and display) ...
-    # st.divider()
-
-
     # --- Detailed Dynamic Table Current Status Table ---
     st.subheader("Detailed Dynamic Table Status")
     
-    # Radio buttons for conditional formatting
+    # Radio buttons for conditional formatting - REMOVED Max Lag and Time Above Target Lag
     color_by_option = st.radio(
         "Color Table By:",
-        ('None', 'Status', 'Mean Lag', 'Max Lag', 'Time Above Target Lag', 'Lag Ratio'),
+        ('None', 'Status', 'Mean Lag', 'Lag Ratio'), # Reduced options
         index=0,
         horizontal=True,
         key="new_color_by_dt_health_table"
@@ -303,12 +303,15 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # Generate dynamic range labels for numeric options
     legend_content = ""
     # Define thresholds for legend generation. This ensures consistency with apply_row_style.
-    legend_thresholds = {
+    thresholds_for_styling = { # Renamed to be consistent
         'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
-        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds
-        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds
+        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds (kept for `apply_row_style` logic)
+        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds (kept for `apply_row_style` logic)
         'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 90%, 70%, 1%
     }
+    # Using 'thresholds_for_styling' for legend generation too
+    legend_thresholds = thresholds_for_styling # Alias for clarity in this section
+
     
     if color_by_option == 'None':
         legend_content = "" # No legend if no coloring
@@ -322,8 +325,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     else: # Numeric options: Mean Lag, Max Lag, Time Above Target Lag, Lag Ratio
         col_key = { # Map radio button label to internal threshold key
             'Mean Lag': 'mean_lag',
-            'Max Lag': 'max_lag',
-            'Time Above Target Lag': 'time_above',
+            # Removed 'Max Lag' and 'Time Above Target Lag' from this map
             'Lag Ratio': 'lag_ratio'
         }.get(color_by_option)
 
@@ -336,14 +338,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
                 else: # Lag in seconds, use main format_seconds_to_readable
-                    # Use a Series for single value to ensure format_seconds_to_readable works correctly
+                    # Ensure it's passed as a Series to format_seconds_to_readable
                     return format_seconds_to_readable(pd.Series([val_raw]), t_format_option).iloc[0]
             
             critical_val_fmt = format_legend_value_for_display(threshold_set['critical'], color_by_option, time_format_option)
             warning_val_fmt = format_legend_value_for_display(threshold_set['warning'], color_by_option, time_format_option)
             ok_val_fmt = format_legend_value_for_display(threshold_set['ok'], color_by_option, time_format_option)
 
-            if color_by_option in ['Mean Lag', 'Max Lag', 'Time Above Target Lag']:
+            if color_by_option in ['Mean Lag']: # Only Mean Lag left for this category
                 # Higher values are worse (Red > Yellow > Green)
                 legend_content = f"""
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (> {critical_val_fmt})</div>
@@ -377,13 +379,8 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # Use a copy for display formatting
     df_for_display = final_filtered_metadata_df.copy()
     
-    # Define thresholds for coloring based on typical values. Pass this 'thresholds' dict to apply_row_style.
-    thresholds_for_styling = {
-        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # 5min, 30min, 1hr in seconds
-        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # 10min, 1hr, 2hr in seconds
-        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # 0, 5min, 30min in seconds
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 90%, 70%, 1%
-    }
+    # The thresholds_for_styling dict remains the same as apply_row_style still uses Max Lag/Time Above
+    # even if the radio buttons are removed. This is fine.
 
     # Apply formatting for display to new columns
     df_for_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TARGET_LAG_SEC'], time_format_option)
@@ -431,15 +428,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     original_sort_column_map = {
         'Status': 'SCHEDULING_STATE_STATUS',
         'Mean Lag': 'MEAN_LAG_SEC',
-        'Max Lag': 'MAXIMUM_LAG_SEC',
-        'Time Above Target Lag': 'TIME_ABOVE_TARGET_LAG_SEC',
-        'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO'
+        'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO' # Updated map
     }
     
     sort_column_original_name = original_sort_column_map.get(color_by_option)
 
     if sort_column_original_name:
-        if sort_column_original_name not in ['SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE']: # Sort numeric columns directly
+        if sort_column_original_name not in ['SCHEDULING_STATE_STATUS']: # Only Status needs special sorting
             ascending = True if color_by_option == 'Lag Ratio' else False
             
             sort_order_indices = final_filtered_metadata_df.sort_values(
@@ -450,26 +445,26 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         else: # Custom sort for 'Status' column (SCHEDULING_STATE_STATUS) based on severity
               # We need to sort by both SCHEDULING_STATE_STATUS and LAST_COMPLETED_REFRESH_STATE
             status_severity_order = {
-                'SUSPENDED': 0, # Highest severity
-                'FAILED': 1,
-                'UPSTREAM_FAILED': 2,
-                'CANCELLED': 3,
-                'WARNING': 4,
-                'RUNNING': 5, # Running should come after non-running critical states
-                'SUCCEEDED': 6,
-                'UNKNOWN': 7 # Unknown last
+                'SUSPENDED': 0, # Highest severity: Suspended
+                'RUNNING': 1,   # Running comes next, then sub-sort by last_refresh_state
+                'UNKNOWN': 99   # Unknown last
             }
-            # Map last refresh state to severity for secondary sorting
+            # Map last refresh state to severity for secondary sorting (for RUNNING tables)
             refresh_state_severity_order = {
-                'FAILED': 0, 'UPSTREAM_FAILED': 1, 'CANCELLED': 2, 'WARNING': 3, 'SUCCEEDED': 4, 'UNKNOWN': 5
+                'FAILED': 0,          # Failed for Running tables
+                'UPSTREAM_FAILED': 1,
+                'CANCELLED': 2,
+                'WARNING': 3,
+                'SUCCEEDED': 4,       # Succeeded last
+                'UNKNOWN': 99
             }
             
             temp_sort_df = pd.DataFrame({
-                'Scheduling_Status_Key': final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(999),
-                'Last_Refresh_State_Key': final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map(refresh_state_severity_order).fillna(999)
+                'Scheduling_Status_Key': final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(99),
+                'Last_Refresh_State_Key': final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map(refresh_state_severity_order).fillna(99)
             }, index=final_filtered_metadata_df.index)
 
-            # Combine sorting by primary scheduling state and then by refresh state
+            # Combine sorting by primary scheduling status and then by refresh state
             sort_order_indices = temp_sort_df.sort_values(
                 by=['Scheduling_Status_Key', 'Last_Refresh_State_Key'], ascending=[True, True]
             ).index
