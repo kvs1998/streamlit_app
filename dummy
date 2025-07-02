@@ -44,7 +44,6 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
-# --- FIX: Moved apply_row_style to GLOBAL SCOPE ---
 # Helper function for ROW-WISE conditional formatting
 def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time_format_option):
     """
@@ -53,15 +52,23 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
     - color_by_option, thresholds, original_df_metadata, time_format_option: Passed as args from lambda.
     """
     # Lookup the corresponding row from the original metadata_df using the 'Dynamic Table' column (QUALIFIED_NAME).
-    original_qualified_name = row.get('Dynamic Table')
-    
-    row_original_data = pd.Series(dtype='object')
+    # This column holds the original QUALIFIED_NAME even after reordering of rows in display_df.
+    original_qualified_name = row.get('Dynamic Table') # Get the QUALIFIED_NAME from the DISPLAY row
+
+    row_original_data = pd.Series(dtype='object') # Default to empty Series
+
+    # --- FIX: Robust lookup of original row based on QUALIFIED_NAME ---
     if original_qualified_name and original_qualified_name in original_df_metadata['QUALIFIED_NAME'].values:
-        row_original_data = original_df_metadata[original_df_metadata['QUALIFIED_NAME'] == original_qualified_name].iloc[0]
+        # Find the row in the original metadata_df that matches this QUALIFIED_NAME
+        # Use .iloc[0] because the filter might return a DataFrame with one row, not a Series directly.
+        row_original_data = original_df_metadata[
+            original_df_metadata['QUALIFIED_NAME'] == original_qualified_name
+        ].iloc[0]
+    # --- END FIX ---
 
     style_str = BG_COLOR_NONE
 
-    if row_original_data.empty:
+    if row_original_data.empty: # If lookup failed or original data is empty, keep default white
         pass 
     elif color_by_option == 'Status':
         status = row_original_data.get('SCHEDULING_STATE_STATUS')
@@ -122,6 +129,7 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
     
+    # Return a Series of style strings with the exact column index of the DataFrame being styled (row.index)
     return pd.Series(style_str, index=row.index)
 
 
@@ -311,7 +319,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
         'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds
         'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 0-1 ratio
+        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 90%, 70%, 1%
     }
     
     if color_by_option == 'None':
@@ -336,6 +344,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             
             # Helper for formatting values in legend
             def format_legend_value_for_display(val_raw, col_type, t_format_option):
+                if pd.isna(val_raw): return "N/A" # Handle NaN values for legend display
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
                 else: # Lag in seconds, use main format_seconds_to_readable
@@ -354,7 +363,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 """
             else: # Lag Ratio: Lower values are worse (Red < Yellow < Green)
                 legend_content = f"""
-                    <div classt='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</div>
+                    <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</div>
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</div>
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</div>
                 """
@@ -479,20 +488,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
-        # FIX: Corrected lambda to pass the necessary arguments in the correct order.
-        # This lambda will correctly pass:
-        #   - row_display: the row from final_df_for_display_sorted (with display labels)
-        #   - color_by_option: from the radio button
-        #   - thresholds_for_styling: the defined thresholds
-        #   - final_filtered_metadata_df: the original full DataFrame (captured in the lambda's closure)
-        #   - time_format_option: for consistency in formatting (captured in lambda's closure)
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                row_display,
-                final_filtered_metadata_df, # Pass the original DF for lookup inside apply_row_style
+                row_display, # Pass the row from the display DataFrame (has display labels)
+                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(dtype='object'), # Pass original row via index lookup
                 color_by_option,
-                thresholds_for_styling,
-                time_format_option
+                thresholds_for_styling, # Pass the specific thresholds for styling
+                time_format_option # Pass time_format_option
             ), 
             axis=1 # Apply row-wise
         )
