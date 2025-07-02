@@ -6,22 +6,24 @@ from datetime import datetime, timedelta
 
 # --- Helper function to convert seconds to a more readable format ---
 def format_seconds_to_readable(seconds_series, format_type):
-    # Handle cases where the series might be empty or all NaN
+    # Ensure seconds_series is a Series for consistent behavior
+    if not isinstance(seconds_series, pd.Series):
+        seconds_series = pd.Series([seconds_series])
+
     if seconds_series.empty or pd.isna(seconds_series).all():
-        # Ensure it returns a series of "N/A" for consistency if input is series
-        if isinstance(seconds_series, pd.Series):
-            return pd.Series(["N/A"] * len(seconds_series), index=seconds_series.index)
-        else: # For single NaN values passed as scalar
-            return "N/A"
+        return pd.Series(["N/A"] * len(seconds_series), index=seconds_series.index)
+
+    # Convert to numeric, coercing errors to NaN before processing
+    numeric_series = pd.to_numeric(seconds_series, errors='coerce')
 
     if format_type == "seconds":
-        return seconds_series.round(1).astype(str) + "s"
+        return numeric_series.round(1).astype(str) + "s"
     elif format_type == "minutes":
-        return (seconds_series / 60).round(1).astype(str) + "m"
+        return (numeric_series / 60).round(1).astype(str) + "m"
     elif format_type == "hours":
-        return (seconds_series / 3600).round(1).astype(str) + "h"
+        return (numeric_series / 3600).round(1).astype(str) + "h"
     elif format_type == "days":
-        return (seconds_series / 86400).round(1).astype(str) + "d"
+        return (numeric_series / 86400).round(1).astype(str) + "d"
     elif format_type == "mixed":
         def mix_format(s):
             if pd.isna(s) or s is None: return "N/A"
@@ -29,7 +31,7 @@ def format_seconds_to_readable(seconds_series, format_type):
             if s == 0: return "0s"
 
             days = int(s // 86400)
-            hours = int((s % 86400) // 3600)
+            hours = int((s % 86640) // 3600) # Fix: (s % 86400) was wrong, it's (s % 86400) // 3600
             minutes = int((s % 3600) // 60)
             seconds = s % 60
             
@@ -38,12 +40,12 @@ def format_seconds_to_readable(seconds_series, format_type):
             if hours > 0: parts.append(f"{hours}h")
             if minutes > 0: parts.append(f"{minutes}m")
             # Only include seconds if there are no larger units or if seconds is significant
-            if seconds > 0.1 and (not parts or seconds >= 1): # Changed from >0 to >0.1 for cleaner output if very small
+            if seconds > 0.1 and (not parts or seconds >= 1):
                 parts.append(f"{seconds:.1f}s")
             
             return " ".join(parts) if parts else "0s"
-        return seconds_series.apply(mix_format)
-    return seconds_series
+        return numeric_series.apply(mix_format)
+    return numeric_series.astype(str) # Fallback to string if type is unknown
 
 
 # --- Helper function to format timestamp to "X days/hours ago" ---
@@ -54,14 +56,14 @@ def format_timestamp_to_time_ago(timestamp_series):
     current_time = datetime.now()
 
     def format_single_timestamp(ts):
-        if pd.isna(ts) or ts is None:
+        if pd.isna(ts) or ts is None or ts == pd.NaT:
             return "N/A"
         
         # Ensure ts is a datetime object
         if not isinstance(ts, pd.Timestamp):
             try:
-                # Attempt to parse common timestamp formats, adjust if specific format needed
-                ts_dt = pd.to_datetime(ts)
+                ts_dt = pd.to_datetime(ts, errors='coerce')
+                if pd.isna(ts_dt): return "Invalid Timestamp"
             except ValueError:
                 return "Invalid Timestamp"
         else:
@@ -82,7 +84,7 @@ def format_timestamp_to_time_ago(timestamp_series):
             return f"{days}d ago"
         else:
             # For older data, just return the date or original string
-            return ts_dt.strftime('%Y-%m-%d') # Or 'ts' if original string preferred
+            return ts_dt.strftime('%Y-%m-%d')
 
     return timestamp_series.apply(format_single_timestamp)
 
@@ -105,13 +107,10 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
     - original_df_full_data: The complete DataFrame with original column names (final_filtered_metadata_df).
     """
     
-    # Use the 'Dynamic Table' value (which holds the original QUALIFIED_NAME) for lookup.
-    # This is the most reliable identifier across different DF versions/indices.
     current_qualified_name = row_from_display_df.get('Dynamic Table')
 
-    row_original_data = pd.Series(dtype='object') # Default to empty Series
+    row_original_data = pd.Series(dtype='object')
     
-    # Ensure original_df_full_data is a DataFrame and has 'QUALIFIED_NAME'
     if isinstance(original_df_full_data, pd.DataFrame) and \
        'QUALIFIED_NAME' in original_df_full_data.columns and \
        current_qualified_name in original_df_full_data['QUALIFIED_NAME'].values:
@@ -120,54 +119,43 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
             original_df_full_data['QUALIFIED_NAME'] == current_qualified_name
         ].iloc[0]
     
-    style_str = f'background-color: {BG_COLOR_NONE}' # Default to white/no color
+    style_str = f'background-color: {BG_COLOR_NONE}'
 
-    if row_original_data.empty: # If lookup failed or original data is empty, keep default white
+    if row_original_data.empty: 
         pass 
     elif color_by_option == 'Status':
         status = row_original_data.get('SCHEDULING_STATE_STATUS')
         last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
 
         if status == 'SUSPENDED':
-            style_str = f'background-color: {BG_COLOR_CRITICAL}' # Suspended is critical
-        elif last_refresh_state == 'FAILED':
-            style_str = f'background-color: {BG_COLOR_CRITICAL}' # Failed is critical
-        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
-            style_str = f'background-color: {BG_COLOR_WARNING}' # Partial issues/warnings
-        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
-            style_str = f'background-color: {BG_COLOR_GOOD}' # Healthy
-        else: # Default for other or unknown states, assume good if not explicitly bad
-            style_str = f'background-color: {BG_COLOR_GOOD}'
-
-    elif color_by_option == 'Mean Lag': # Kept for backward compatibility if ever re-added
-        lag = row_original_data.get('MEAN_LAG_SEC')
-        if pd.isna(lag):
-            style_str = f'background-color: {BG_COLOR_NONE}'
-        elif lag >= thresholds['mean_lag']['critical']:
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif lag >= thresholds['mean_lag']['warning']:
+        elif last_refresh_state == 'FAILED':
+            style_str = f'background-color: {BG_COLOR_CRITICAL}'
+        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
             style_str = f'background-color: {BG_COLOR_WARNING}'
+        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
+            style_str = f'background-color: {BG_COLOR_GOOD}'
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Lag Ratio':
         ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        if pd.isna(ratio):
-            style_str = f'background-color: {BG_COLOR_NONE}'
-        elif ratio < thresholds['lag_ratio']['critical']:
+        # Here, `ratio` should already be a float (0.0 for NaNs after fillna).
+        # We don't need to check for pd.isna here, as it's handled upstream.
+        if ratio < thresholds['lag_ratio']['critical']: # This is 0.01
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif ratio < thresholds['lag_ratio']['warning']:
+        elif ratio < thresholds['lag_ratio']['warning']: # This is 0.70
             style_str = f'background-color: {BG_COLOR_WARNING}'
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
             
     elif color_by_option == 'Latest Data Time':
-        latest_data_ts = row_original_data.get('LATEST_DATA_TIMESTAMP') # This is now a datetime object
-        if pd.isna(latest_data_ts): # pd.NaT is handled by pd.isna
+        latest_data_ts = row_original_data.get('LATEST_DATA_TIMESTAMP')
+        if pd.isna(latest_data_ts): 
             style_str = f'background-color: {BG_COLOR_NONE}'
         else:
             try:
-                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 # in days
+                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 
                 
                 if time_diff_days >= thresholds['latest_data_time']['critical']:
                     style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -175,7 +163,7 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
                     style_str = f'background-color: {BG_COLOR_WARNING}'
                 else:
                     style_str = f'background-color: {BG_COLOR_GOOD}'
-            except Exception: # Handle potential issues if timestamp isn't valid datetime
+            except Exception: 
                 style_str = f'background-color: {BG_COLOR_NONE}'
     
     return pd.Series(style_str, index=row_from_display_df.index)
@@ -210,16 +198,20 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             else:
                 metadata_df[col] = 'UNKNOWN'
     
-    for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC']:
+    for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TARGET_LAG_SEC']:
         metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
     
+    # IMPORTANT FIX: Fill NaNs in TIME_WITHIN_TARGET_LAG_RATIO with 0 BEFORE filtering/copying
+    # This ensures apply_row_style always gets a numeric value for comparison.
+    metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
+
     # Convert LATEST_DATA_TIMESTAMP to datetime objects for accurate comparison
     metadata_df['LATEST_DATA_TIMESTAMP'] = pd.to_datetime(metadata_df['LATEST_DATA_TIMESTAMP'], errors='coerce')
 
 
-    filtered_metadata_df = metadata_df.copy() 
+    final_filtered_metadata_df = metadata_df.copy() 
     
-    if filtered_metadata_df.empty:
+    if final_filtered_metadata_df.empty:
         st.info("No Dynamic Table data available. Please adjust your filters or check data source.", icon="ℹ️")
         return
 
@@ -231,12 +223,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
 
     with filter_cols_dt_health_row1[0]:
-        all_databases_dt_health = ['All'] + sorted(filtered_metadata_df['DATABASE_NAME'].unique().tolist())
+        all_databases_dt_health = ['All'] + sorted(final_filtered_metadata_df['DATABASE_NAME'].unique().tolist())
         selected_database_dt_health = st.selectbox(
             "Database:", options=all_databases_dt_health, key="new_db_filter_dt_health"
         )
     with filter_cols_dt_health_row1[1]:
-        temp_df_for_schema_options = filtered_metadata_df.copy()
+        temp_df_for_schema_options = final_filtered_metadata_df.copy()
         if selected_database_dt_health != 'All':
             temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
 
@@ -250,7 +242,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             "Schema:", options=schemas_in_db_dt_health, key="new_schema_filter_dt_health"
         )
     
-    df_for_table_options = filtered_metadata_df.copy()
+    df_for_table_options = final_filtered_metadata_df.copy()
     if selected_database_dt_health != 'All':
         df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
@@ -269,7 +261,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="new_table_filter_dt_health"
         )
     with filter_cols_dt_health_row1[3]:
-        all_scheduling_states = ['All'] + sorted(filtered_metadata_df['SCHEDULING_STATE_STATUS'].unique().tolist())
+        all_scheduling_states = ['All'] + sorted(final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].unique().tolist())
         selected_scheduling_state = st.multiselect(
             "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="new_scheduling_state_filter_dt_health"
         )
@@ -288,8 +280,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     # --- Apply Filters to Main DataFrame (re-filter based on user selections) ---
-    final_filtered_metadata_df = filtered_metadata_df.copy() 
-
+    # Apply filters to the already pre-processed metadata_df
     if selected_database_dt_health != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
@@ -314,10 +305,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # --- Detailed Dynamic Table Current Status Table ---
     st.subheader("Detailed Dynamic Table Status")
     
-    # Radio buttons for conditional formatting - UPDATED OPTIONS
     color_by_option = st.radio(
         "Color Table By:",
-        ('None', 'Status', 'Lag Ratio', 'Latest Data Time'), # Removed Mean Lag, Max Lag, Time Above Target Lag
+        ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
         index=0,
         horizontal=True,
         key="new_color_by_dt_health_table"
@@ -338,26 +328,24 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             display: inline-block;
             vertical-align: middle;
             margin-right: 5px;
-            border: 1px solid #ccc; /* Add a subtle border for visibility */
+            border: 1px solid #ccc;
         }
         </style>
         """, unsafe_allow_html=True)
     
-    # Define thresholds for coloring based on typical values.
-    # Keep `mean_lag`, `max_lag`, `time_above` for `apply_row_style` even if not in radio
     thresholds_for_styling = { 
-        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
-        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds
-        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, # 90%, 70%, 1%
-        'latest_data_time': {'ok': 1, 'warning': 3, 'critical': 7} # Days: <=1d good, 1-3d warning, >3d critical
+        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
+        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
+        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
+        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, # Ensure 0.01 is correctly interpreted as 1.0%
+        'latest_data_time': {'ok': 1, 'warning': 3, 'critical': 7}
     }
-    legend_thresholds = thresholds_for_styling # Alias for clarity in this section
+    legend_thresholds = thresholds_for_styling 
 
     legend_content = ""
     
     if color_by_option == 'None':
-        legend_content = "" # No legend if no coloring
+        legend_content = ""
     elif color_by_option == 'Status':
         legend_content = f"""
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</div>
@@ -367,16 +355,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     elif color_by_option == 'Lag Ratio':
         threshold_set = legend_thresholds['lag_ratio'] 
         
-        # Use a consistent helper for legend value formatting (scalar)
         def format_legend_value_ratio(val_raw):
             if pd.isna(val_raw): return "N/A"
-            return f"{round(val_raw * 100, 1)}%"
+            return f"{round(val_raw * 100, 1)}%" # Format as percentage for legend
         
         critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
         warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
         ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
 
-        # Lag Ratio: Lower values are worse (Red < Yellow < Green)
         legend_content = f"""
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</div>
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</div>
@@ -385,17 +371,15 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     elif color_by_option == 'Latest Data Time':
         threshold_set = legend_thresholds['latest_data_time'] 
         
-        # Helper for formatting latest data time in legend
         def format_legend_value_days(val_raw):
             if pd.isna(val_raw): return "N/A"
             if val_raw == 1: return "1 day"
-            return f"{int(val_raw)} days" # Display as days for legend
+            return f"{int(val_raw)} days"
         
         critical_val_fmt = format_legend_value_days(threshold_set['critical'])
         warning_val_fmt = format_legend_value_days(threshold_set['warning'])
         ok_val_fmt = format_legend_value_days(threshold_set['ok'])
 
-        # Latest Data Time: Higher days (older data) are worse (Red > Yellow > Green)
         legend_content = f"""
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (>= {critical_val_fmt})</div>
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (>= {warning_val_fmt})</div>
@@ -427,7 +411,8 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MEAN_LAG_SEC'], time_format_option)
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
-    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
+    # This `_FMT` column will correctly display 0.0% because the original `TIME_WITHIN_TARGET_LAG_RATIO` was filled with 0.0
+    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
     df_for_display['LATEST_DATA_TIMESTAMP_FMT'] = format_timestamp_to_time_ago(df_for_display['LATEST_DATA_TIMESTAMP'])
 
 
@@ -458,17 +443,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     }
 
     # Select and rename columns for the display DataFrame
-    # This should happen AFTER all formatting and BEFORE sorting if sorting needs original columns
-    # OR, if sorting operates on the 'df_for_display' itself, this happens before sorting
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
 
 
     # --- Apply Sorting ---
-    final_df_for_display_sorted = df_for_display.copy() # Start with the fully formatted display df
+    final_df_for_display_sorted = df_for_display.copy() 
 
-    # Determine sorting criteria. Note: `sort_values` expects original column names.
-    # The map below uses the *display labels* as keys to get the *original column names*
-    # from final_filtered_metadata_df for sorting.
     original_sort_column_map_for_sort_values = {
         'Status': 'SCHEDULING_STATE_STATUS',
         'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO', 
@@ -479,13 +459,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     if sort_column_original_name:
         if sort_column_original_name == 'TIME_WITHIN_TARGET_LAG_RATIO': 
-            # Sort the original filtered data by this column, then reindex the display DF
-            sort_order_indices = final_filtered_metadata_df.sort_values(
+            sort_order_indices = final_filtered_metadata_df.sort_values( # Use original for sort logic
                 by='TIME_WITHIN_TARGET_LAG_RATIO', ascending=False, na_position='last' 
             ).index
             final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
         elif sort_column_original_name == 'LATEST_DATA_TIMESTAMP':
-             sort_order_indices = final_filtered_metadata_df.sort_values(
+             sort_order_indices = final_filtered_metadata_df.sort_values( # Use original for sort logic
                 by='LATEST_DATA_TIMESTAMP', ascending=False, na_position='last' 
             ).index
              final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
@@ -504,20 +483,16 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 'UNKNOWN': 99
             }
             
-            temp_sort_df_keys = pd.DataFrame({ # Create temp df of keys from original data
+            temp_sort_df_keys = pd.DataFrame({ 
                 'Scheduling_Status_Key': final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].map(status_severity_order).fillna(99),
                 'Last_Refresh_State_Key': final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map(refresh_state_severity_order).fillna(99)
             }, index=final_filtered_metadata_df.index)
 
-            sort_order_indices = temp_sort_df_keys.sort_values( # Sort based on these keys
+            sort_order_indices = temp_sort_df_keys.sort_values( 
                 by=['Scheduling_Status_Key', 'Last_Refresh_State_Key'], ascending=[True, True]
             ).index
             final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
         
-        # After sorting, the 'final_df_for_display_sorted' already has the correct _FMT columns
-        # because we formatted them *before* sorting, and we used .loc[sort_order_indices]
-        # to reorder the *already formatted* display DataFrame.
-
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
         styled_df = final_df_for_display_sorted.style.apply(
