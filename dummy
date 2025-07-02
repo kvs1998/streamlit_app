@@ -4,6 +4,24 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
+# --- Global Colors for Row Styling ---
+BG_COLOR_GOOD = '#ccffcc'  # Light Green (Healthy)
+BG_COLOR_WARNING = '#ffe0b3'  # Light Orange (Warning/Partial Failure)
+BG_COLOR_CRITICAL = '#f8d7da'  # Light Red (Suspended/Failed)
+BG_COLOR_NONE = '#ffffff'  # Explicit white for 'None' option or NaN values
+
+# --- Thresholds for Conditional Styling and Sorting ---
+THRESHOLDS = {
+    'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
+    'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
+    'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
+    'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01},
+    'latest_data_time': {
+        'critical_days': 3,
+        'warning_days': 1
+    }
+}
+
 # --- Helper function to convert seconds to a more readable format ---
 def format_seconds_to_readable(seconds_series, format_type):
     # Ensure seconds_series is a Series for consistent behavior, and handle scalar NaNs
@@ -21,7 +39,7 @@ def format_seconds_to_readable(seconds_series, format_type):
     def format_single_second(s, f_type):
         if pd.isna(s):
             return "N/A"
-        
+
         if f_type == "seconds":
             return f"{s:.1f}s"
         elif f_type == "minutes":
@@ -35,55 +53,41 @@ def format_seconds_to_readable(seconds_series, format_type):
             hours = int((s % 86400) // 3600)
             minutes = int((s % 3600) // 60)
             seconds = s % 60
-            
+
             parts = []
-            if days > 0: parts.append(f"{days}d")
-            if hours > 0: parts.append(f"{hours}h")
-            if minutes > 0: parts.append(f"{minutes}m")
+            if days > 0:
+                parts.append(f"{days}d")
+            if hours > 0:
+                parts.append(f"{hours}h")
+            if minutes > 0:
+                parts.append(f"{minutes}m")
+            # Only show seconds if they are significant or it's the only component
             if seconds > 0.1 and (not parts or seconds >= 1):
                 parts.append(f"{seconds:.1f}s")
-            
+
             return " ".join(parts) if parts else "0s"
-        return str(s) # Fallback
+        return str(s)  # Fallback
 
     return numeric_series.apply(lambda x: format_single_second(x, format_type))
 
 
 # --- Helper function for Legend text formatting (scalar value) ---
 def format_stale_days_for_legend(days_value):
-    if pd.isna(days_value): return "N/A"
-    if days_value == 1: return "1 day"
+    if pd.isna(days_value):
+        return "N/A"
+    if days_value == 1:
+        return "1 day"
     return f"{int(days_value)} days"
 
 
-# --- Define Global Colors for Row Styling ---
-BG_COLOR_GOOD = '#ccffcc' # Light Green (Healthy)
-BG_COLOR_WARNING = '#ffe0b3' # Light Orange (Warning/Partial Failure)
-BG_COLOR_CRITICAL = '#f8d7da' # Light Red (Suspended/Failed)
-BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
+# Helper function for ROW-WISE conditional formatting (Optimized)
+# This function works directly on the row data and does not need to lookup another DataFrame.
+def apply_row_style_optimized(row, color_by_option, thresholds, current_time):
+    style_str = 'background-color: transparent;' # Default for 'None' or fallback
 
-
-# Helper function for ROW-WISE conditional formatting
-def apply_row_style(row_from_display_df, color_by_option, thresholds, original_df_full_data):
-    current_qualified_name = row_from_display_df.get('Dynamic Table')
-
-    row_original_data = pd.Series(dtype='object')
-    
-    if isinstance(original_df_full_data, pd.DataFrame) and \
-       'QUALIFIED_NAME' in original_df_full_data.columns and \
-       current_qualified_name in original_df_full_data['QUALIFIED_NAME'].values:
-        
-        row_original_data = original_df_full_data[
-            original_df_full_data['QUALIFIED_NAME'] == current_qualified_name
-        ].iloc[0]
-    
-    style_str = 'background-color: transparent;'
-
-    if row_original_data.empty: 
-        pass 
-    elif color_by_option == 'Status':
-        status = row_original_data.get('SCHEDULING_STATE_STATUS')
-        last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
+    if color_by_option == 'Status':
+        status = row.get('SCHEDULING_STATE_STATUS')
+        last_refresh_state = row.get('LAST_COMPLETED_REFRESH_STATE')
 
         if status == 'SUSPENDED':
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
@@ -93,40 +97,78 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
             style_str = f'background-color: {BG_COLOR_WARNING}'
         elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
             style_str = f'background-color: {BG_COLOR_GOOD}'
-        else: # Default for other or unknown states, assume good if not explicitly bad
+        else:  # Default for other or unknown states, assume good if not explicitly bad
             style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Lag Ratio':
-        ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        if ratio < thresholds['lag_ratio']['critical']:
+        ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
+        if pd.isna(ratio):
+            style_str = f'background-color: {BG_COLOR_NONE}'
+        elif ratio < thresholds['lag_ratio']['critical']:
             style_str = f'background-color: {BG_COLOR_CRITICAL}'
         elif ratio < thresholds['lag_ratio']['warning']:
             style_str = f'background-color: {BG_COLOR_WARNING}'
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
-            
+
     elif color_by_option == 'Latest Data Time':
-        latest_data_ts = row_original_data.get('LATEST_DATA_TIMESTAMP')
-        if pd.isna(latest_data_ts): 
+        latest_data_ts = row.get('LATEST_DATA_TIMESTAMP')
+        if pd.isna(latest_data_ts):
             style_str = f'background-color: {BG_COLOR_NONE}'
         else:
             try:
-                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 
-                
+                time_diff_days = (current_time - latest_data_ts).total_seconds() / 86400
+
                 if time_diff_days >= thresholds['latest_data_time']['critical_days']:
                     style_str = f'background-color: {BG_COLOR_CRITICAL}'
                 elif time_diff_days >= thresholds['latest_data_time']['warning_days']:
                     style_str = f'background-color: {BG_COLOR_WARNING}'
-                else: 
+                else:
                     style_str = f'background-color: {BG_COLOR_GOOD}'
-            except Exception: 
+            except Exception:
                 style_str = f'background-color: {BG_COLOR_NONE}'
-    
-    return pd.Series(style_str, index=row_from_display_df.index, dtype='object')
+
+    # Return a Series of style strings, one for each column, so all cells in the row get the same background
+    # This is required by pandas.Styler.apply(axis=1) for row-wise styling
+    return pd.Series(style_str, index=row.index)
 
 
+# Helper functions for sorting
+status_and_refresh_severity_sort_order = {
+    ('SUSPENDED', 'FAILED'): 0, ('SUSPENDED', 'UPSTREAM_FAILED'): 1,
+    ('SUSPENDED', 'CANCELLED'): 2, ('SUSPENDED', 'WARNING'): 3,
+    ('SUSPENDED', 'SUCCEEDED'): 4, ('SUSPENDED', 'UNKNOWN'): 5,
+    ('RUNNING', 'FAILED'): 6,
+    ('RUNNING', 'UPSTREAM_FAILED'): 7, ('RUNNING', 'CANCELLED'): 8,
+    ('RUNNING', 'WARNING'): 9,
+    ('RUNNING', 'SUCCEEDED'): 10,
+    ('UNKNOWN', 'UNKNOWN'): 11, (None, None): 12 # Handle missing values gracefully
+}
+
+def get_lag_ratio_sort_key(row, thresholds):
+    ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
+    if pd.isna(ratio):
+        return 99 # Highest sort key for NaNs (at the end)
+    if ratio < thresholds['lag_ratio']['critical']:
+        return 0 # Most critical
+    if ratio < thresholds['lag_ratio']['warning']:
+        return 1 # Warning
+    return 2 # Good
+
+def get_latest_data_time_sort_key(row, thresholds, current_time):
+    latest_data_ts = row.get('LATEST_DATA_TIMESTAMP')
+    if pd.isna(latest_data_ts):
+        return 99 # Highest sort key for NaNs
+    time_diff_days = (current_time - latest_data_ts).total_seconds() / 86400
+    if time_diff_days >= thresholds['latest_data_time']['critical_days']:
+        return 0 # Oldest data (most critical)
+    if time_diff_days >= thresholds['latest_data_time']['warning_days']:
+        return 1 # Warning
+    return 2 # Recent data (good)
+
+
+# --- Main Streamlit Tab Rendering Function ---
 def render_dt_health_tab(metadata_df: pd.DataFrame):
-    # Initial Header and Description (Unchanged)
     st.header("Dynamic Table Health & Current Status")
     st.write("Analyze the current operational state and aggregate lag metrics of your dynamic tables.")
 
@@ -134,52 +176,56 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         st.info("No metadata available for DT HEALTH tab. Check data source or collection.", icon="ℹ️")
         return
 
-    # Data Preprocessing (Unchanged)
+    # --- Data Preprocessing ---
     if 'QUALIFIED_NAME' not in metadata_df.columns:
         st.error("Error: 'QUALIFIED_NAME' column missing in metadata_df. Cannot proceed with DT Health tab.", icon="❌")
-        return 
+        return
     metadata_df['QUALIFIED_NAME'] = metadata_df['QUALIFIED_NAME'].astype(str).str.upper()
 
     required_cols_for_lookup = [
-        'DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 
-        'SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE', 
-        'MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC',
-        'LATEST_DATA_TIMESTAMP' 
+        'DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME',
+        'SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE',
+        'MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC',
+        'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC',
+        'LATEST_DATA_TIMESTAMP'
     ]
     for col in required_cols_for_lookup:
         if col not in metadata_df.columns:
             st.warning(f"Warning: Column '{col}' missing in metadata_df. Initializing with NaNs/Defaults for safety.", icon="⚠️")
             if col.endswith('_SEC') or col.endswith('_RATIO'):
                 metadata_df[col] = np.nan
-            elif col.endswith('_TIMESTAMP'): 
-                 metadata_df[col] = pd.NaT 
+            elif col.endswith('_TIMESTAMP'):
+                metadata_df[col] = pd.NaT
             else:
                 metadata_df[col] = 'UNKNOWN'
-    
+
     for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TARGET_LAG_SEC']:
         metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
-    
-    metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
 
+    metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
     metadata_df['LATEST_DATA_TIMESTAMP'] = pd.to_datetime(metadata_df['LATEST_DATA_TIMESTAMP'], errors='coerce')
 
+    # Get current time once for consistent "Latest Data Time" calculations
+    current_time_for_calculations = datetime.now()
 
-    # --- Keep a copy of the *original* filtered df (before legend filters) for consistency ---
-    base_filtered_df = metadata_df.copy() 
-    
-    # --- Apply Filters from Top Section ---
+
+    # Using a copy of the metadata_df for filtering to avoid modifying the original input
+    # This also acts as the base DataFrame for all further operations including sorting and styling
+    filtered_df_for_processing = metadata_df.copy()
+
+    # --- Filters for DT Health Tab ---
     st.markdown("---")
     st.subheader("Apply Filters for DT Health")
 
     filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
 
     with filter_cols_dt_health_row1[0]:
-        all_databases_dt_health = ['All'] + sorted(base_filtered_df['DATABASE_NAME'].unique().tolist())
+        all_databases_dt_health = ['All'] + sorted(filtered_df_for_processing['DATABASE_NAME'].unique().tolist())
         selected_database_dt_health = st.selectbox(
             "Database:", options=all_databases_dt_health, key="new_db_filter_dt_health"
         )
     with filter_cols_dt_health_row1[1]:
-        temp_df_for_schema_options = base_filtered_df.copy()
+        temp_df_for_schema_options = filtered_df_for_processing.copy()
         if selected_database_dt_health != 'All':
             temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
 
@@ -187,13 +233,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
         else:
             schemas_in_db_dt_health = ['All']
-            st.info("No schemas found for selected Database.", icon="ℹ️")
+            # Removed st.info here as it can be confusing if 'All' is a valid option.
+            # A general "No data" message after all filters is more effective.
 
         selected_schema_dt_health = st.selectbox(
             "Schema:", options=schemas_in_db_dt_health, key="new_schema_filter_dt_health"
         )
-    
-    df_for_table_options = base_filtered_df.copy()
+
+    df_for_table_options = filtered_df_for_processing.copy()
     if selected_database_dt_health != 'All':
         df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
@@ -207,299 +254,196 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         else:
             all_tables_dt_health_options = ['All']
             default_tables_dt_health_selected = ['All']
-            st.info("No tables found for selected DB/Schema.", icon="ℹ️")
+            # Removed st.info here as above.
         selected_table_dt_health = st.multiselect(
             "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="new_table_filter_dt_health"
         )
     with filter_cols_dt_health_row1[3]:
-        all_scheduling_states = ['All'] + sorted(base_filtered_df['SCHEDULING_STATE_STATUS'].unique().tolist())
+        all_scheduling_states = ['All'] + sorted(filtered_df_for_processing['SCHEDULING_STATE_STATUS'].unique().tolist())
         selected_scheduling_state = st.multiselect(
             "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="new_scheduling_state_filter_dt_health"
         )
-    
+
     filter_cols_dt_health_row2 = st.columns([1])
     with filter_cols_dt_health_row2[0]:
         time_format_option = st.radio(
-            "Display Lag Times In:", 
-            options=["mixed", "seconds", "minutes", "hours", "days"], 
+            "Display Lag Times In:",
+            options=["mixed", "seconds", "minutes", "hours", "days"],
             index=0,
             horizontal=True,
             key="new_time_format_dt_health"
         )
-    
+
     st.markdown("---")
 
-    # Apply the top-level filters
+
+    # --- Apply Filters to Main DataFrame (re-filter based on user selections) ---
     if selected_database_dt_health != 'All':
-        base_filtered_df = base_filtered_df[base_filtered_df['DATABASE_NAME'] == selected_database_dt_health].copy()
+        filtered_df_for_processing = filtered_df_for_processing[filtered_df_for_processing['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
-        base_filtered_df = base_filtered_df[base_filtered_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+        filtered_df_for_processing = filtered_df_for_processing[filtered_df_for_processing['SCHEMA_NAME'] == selected_schema_dt_health].copy()
     if selected_table_dt_health and 'All' not in selected_table_dt_health:
-        base_filtered_df = base_filtered_df[base_filtered_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
+        filtered_df_for_processing = filtered_df_for_processing[filtered_df_for_processing['TABLE_NAME'].isin(selected_table_dt_health)].copy()
     elif not selected_table_dt_health:
         st.warning("No table(s) selected. Display will be empty.", icon="⚠️")
-        base_filtered_df = pd.DataFrame()
+        filtered_df_for_processing = pd.DataFrame() # Set empty if no selections
 
     if selected_scheduling_state and 'All' not in selected_scheduling_state:
-        base_filtered_df = base_filtered_df[base_filtered_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
+        filtered_df_for_processing = filtered_df_for_processing[filtered_df_for_processing['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
     elif not selected_scheduling_state:
         st.warning("No scheduling state(s) selected. Display will be empty.", icon="⚠️")
-        base_filtered_df = pd.DataFrame()
+        filtered_df_for_processing = pd.DataFrame() # Set empty if no selections
 
-    if base_filtered_df.empty:
+
+    if filtered_df_for_processing.empty:
         st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
         return
 
-    # This will be the DataFrame that gets *further* filtered by legend toggles
-    final_filtered_metadata_df = base_filtered_df.copy()
 
     # --- Detailed Dynamic Table Current Status Table Section ---
-    
-    # Custom CSS for a minimal color box helper, if we still want it
-    # We'll use a very minimal approach here to avoid complex layouts
+
+    # Custom CSS for legend items (still useful for color box + text on same line)
     st.markdown("""
         <style>
-        .color-box-flex {
+        .legend-item {
+            display: inline-flex; /* Use inline-flex to keep color box and text together */
+            align-items: center; /* Vertically align content */
+            margin-left: 15px; /* Space between legend items */
+            font-size: 14px;
+            white-space: nowrap; /* Prevent individual legend items from wrapping text */
+        }
+        .color-box {
             width: 15px;
             height: 15px;
             border-radius: 3px;
-            display: inline-block; /* Keep it inline with text if needed, or flex item */
-            margin-right: 5px; /* Space between box and text */
+            display: inline-block;
+            margin-right: 5px;
             border: 1px solid #ccc;
-            flex-shrink: 0; /* Prevent the box from shrinking */
-        }
-        /* Make st.checkbox labels smaller for legend */
-        .stCheckbox > label {
-            font-size: 14px;
         }
         </style>
         """, unsafe_allow_html=True)
 
-    # Use Streamlit columns for layout
-    col1, col2 = st.columns([0.4, 0.6]) # Adjust ratio as needed
+    col1, col2 = st.columns([0.4, 0.6])
 
     with col1:
-        st.subheader("Detailed Dynamic Table Status") # Keep as subheader for consistent font size
-    
+        st.subheader("Detailed Dynamic Table Status")
     with col2:
         color_by_option = st.radio(
             "Color Table By:",
             ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
             index=0,
-            horizontal=True, 
+            horizontal=True,
             key="new_color_by_dt_health_table"
         )
-    
-    # Next row of columns for "Severity:" and legend items (now with toggles)
-    severity_label_col, legend_items_col = st.columns([0.15, 0.85]) 
 
-    selected_legend_filters = [] # To store the states of toggles
+    severity_label_col, legend_items_col = st.columns([0.15, 0.85])
 
     with severity_label_col:
         st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
-    
+
     with legend_items_col:
-        # Thresholds (already defined)
-        thresholds_for_styling = { 
-            'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
-            'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
-            'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
-            'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
-            'latest_data_time': {
-                'critical_days': 3,  
-                'warning_days': 1    
-            }
-        }
-        legend_thresholds = thresholds_for_styling 
+        legend_thresholds = THRESHOLDS
+        legend_items_html = []
 
-        # Create columns within the legend_items_col to hold the checkboxes
-        if color_by_option != 'None':
-            # Create a container to hold all legend items to prevent wrapping issues if many items
-            with st.container():
-                # Use columns to lay out legend items horizontally
-                # We can adjust the number of columns based on how many legend items are in each category
-                # For 3 items (Critical, Warning, Good), 3 columns make sense.
-                legend_checkbox_cols = st.columns(3) 
+        if color_by_option == 'Status':
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</span>")
+        elif color_by_option == 'Lag Ratio':
+            threshold_set = legend_thresholds['lag_ratio']
 
-                if color_by_option == 'Status':
-                    with legend_checkbox_cols[0]:
-                        # Combine the color box HTML and the label text directly into the checkbox label
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed",
-                            key="legend_filter_status_critical",
-                            help="Filter for Suspended or Failed refreshes",
-                            value=False,
-                            unsafe_allow_html=True # Allow HTML in checkbox label
-                        ): selected_legend_filters.append('status_critical')
+            def format_legend_value_ratio(val_raw):
+                if pd.isna(val_raw):
+                    return "N/A"
+                return f"{round(val_raw * 100, 1)}%"
 
-                    with legend_checkbox_cols[1]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure",
-                            key="legend_filter_status_warning",
-                            help="Filter for Warning, Cancelled, or Upstream Failed refreshes",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('status_warning')
+            critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
+            warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
+            ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
 
-                    with legend_checkbox_cols[2]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)",
-                            key="legend_filter_status_good",
-                            help="Filter for Running and Succeeded refreshes",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('status_good')
-                        
-                elif color_by_option == 'Lag Ratio':
-                    threshold_set = legend_thresholds['lag_ratio'] 
-                    critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
-                    warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
-                    ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</span>")
+        elif color_by_option == 'Latest Data Time':
+            critical_val_days = legend_thresholds['latest_data_time']['critical_days']
+            warning_val_days = legend_thresholds['latest_data_time']['warning_days']
 
-                    with legend_checkbox_cols[0]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})",
-                            key="legend_filter_lag_critical",
-                            help="Filter for Lag Ratio below Critical threshold",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('lag_critical')
+            critical_text = format_stale_days_for_legend(critical_val_days)
+            warning_text = format_stale_days_for_legend(warning_val_days)
 
-                    with legend_checkbox_cols[1]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})",
-                            key="legend_filter_lag_warning",
-                            help="Filter for Lag Ratio below Warning threshold",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('lag_warning')
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old</span>")
 
-                    with legend_checkbox_cols[2]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})",
-                            key="legend_filter_lag_good",
-                            help="Filter for Lag Ratio at or above Good threshold",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('lag_good')
+        if legend_items_html:
+            st.markdown(
+                f"""<div style='display:flex; flex-wrap:wrap; justify-content:flex-end;'>{"".join(legend_items_html)}</div>""",
+                unsafe_allow_html=True
+            )
 
-                elif color_by_option == 'Latest Data Time':
-                    critical_val_days = legend_thresholds['latest_data_time']['critical_days']
-                    warning_val_days = legend_thresholds['latest_data_time']['warning_days']
-                    
-                    critical_text = format_stale_days_for_legend(critical_val_days)
-                    warning_text = format_stale_days_for_legend(warning_val_days)
-
-                    with legend_checkbox_cols[0]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older",
-                            key="legend_filter_data_critical",
-                            help="Filter for data older than critical threshold",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('data_critical')
-
-                    with legend_checkbox_cols[1]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old",
-                            key="legend_filter_data_warning",
-                            help="Filter for data between warning and critical thresholds",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('data_warning')
-
-                    with legend_checkbox_cols[2]:
-                        if st.checkbox(
-                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old",
-                            key="legend_filter_data_good",
-                            help="Filter for data newer than warning threshold",
-                            value=False,
-                            unsafe_allow_html=True
-                        ): selected_legend_filters.append('data_good')
-            
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
-    # --- Apply Legend Filters to final_filtered_metadata_df ---
-    if selected_legend_filters: # Only apply if any legend filter is active
-        temp_filtered_df = pd.DataFrame() # Accumulate rows that match any selected filter
-        
-        # Status-based filtering
-        if 'status_critical' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'SUSPENDED') |
-                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'] == 'FAILED')
-            ]])
-        if 'status_warning' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].isin(['UPSTREAM_FAILED', 'CANCELLED', 'WARNING'])) &
-                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] != 'SUSPENDED') # Avoid double-counting suspended
-            ]])
-        if 'status_good' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'RUNNING') & 
-                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'] == 'SUCCEEDED')
-            ]])
-        
-        # Lag Ratio-based filtering
-        if 'lag_critical' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['critical']
-            ]])
-        if 'lag_warning' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['critical']) &
-                (final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['warning'])
-            ]])
-        if 'lag_good' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['ok']
-            ]])
 
-        # Latest Data Time-based filtering
-        now = datetime.now()
-        if 'data_critical' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                ((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) >= thresholds_for_styling['latest_data_time']['critical_days']
-            ]])
-        if 'data_warning' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) >= thresholds_for_styling['latest_data_time']['warning_days']) &
-                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) < thresholds_for_styling['latest_data_time']['critical_days'])
-            ]])
-        if 'data_good' in selected_legend_filters:
-            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
-                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) < thresholds_for_styling['latest_data_time']['warning_days'])
-            ]])
-        
-        # Remove duplicates if a row matched multiple legend filters
-        final_filtered_metadata_df = temp_filtered_df.drop_duplicates(subset=['QUALIFIED_NAME']).copy()
-    
-    if final_filtered_metadata_df.empty:
-        st.info("No detailed dynamic table status to display based on current filters and legend selections.", icon="ℹ️")
-        return
+    # --- Prepare Data for Sorting and Styling ---
+    # Add sort keys directly to filtered_df_for_processing
+    filtered_df_for_processing['COMPOUND_STATUS_SORT_KEY'] = filtered_df_for_processing.apply(
+        lambda row: status_and_refresh_severity_sort_order.get(
+            (row.get('SCHEDULING_STATE_STATUS'), row.get('LAST_COMPLETED_REFRESH_STATE')),
+            status_and_refresh_severity_sort_order[(None, None)]
+        ), axis=1
+    )
+    filtered_df_for_processing['LAG_RATIO_SORT_KEY'] = filtered_df_for_processing.apply(
+        lambda row: get_lag_ratio_sort_key(row, THRESHOLDS), axis=1
+    )
+    filtered_df_for_processing['LATEST_DATA_TIME_SORT_KEY'] = filtered_df_for_processing.apply(
+        lambda row: get_latest_data_time_sort_key(row, THRESHOLDS, current_time_for_calculations), axis=1
+    )
 
-    # Use a copy for display formatting
-    df_for_display = final_filtered_metadata_df.copy()
-    
-    # Apply formatting for display to new columns
+
+    # --- Apply Sorting to the main DataFrame ---
+    sort_columns = []
+    ascending_flags = []
+
+    if color_by_option == 'None' or color_by_option == 'Status':
+        sort_columns = ['COMPOUND_STATUS_SORT_KEY']
+        ascending_flags = [True]
+    elif color_by_option == 'Lag Ratio':
+        # Sort by Lag Ratio sort key first (critical, warning, good), then by actual ratio ascending (lower ratio is worse)
+        sort_columns = ['LAG_RATIO_SORT_KEY', 'TIME_WITHIN_TARGET_LAG_RATIO']
+        ascending_flags = [True, True]
+    elif color_by_option == 'Latest Data Time':
+        # Sort by Latest Data Time sort key (older data is worse), then by timestamp ascending (older timestamp is worse)
+        sort_columns = ['LATEST_DATA_TIME_SORT_KEY', 'LATEST_DATA_TIMESTAMP']
+        ascending_flags = [True, True]
+
+    if sort_columns:
+        filtered_df_for_processing = filtered_df_for_processing.sort_values(
+            by=sort_columns, ascending=ascending_flags, na_position='last'
+        ).reset_index(drop=True)
+
+
+    # --- Prepare Display DataFrame after Sorting ---
+    # Create the display-formatted DataFrame from the sorted one
+    df_for_display = filtered_df_for_processing.copy()
+
     df_for_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TARGET_LAG_SEC'], time_format_option)
     df_for_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MEAN_LAG_SEC'], time_format_option)
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
-    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
+    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%")
 
 
     # Define display columns and their labels
     dt_health_display_columns_order = [
         'QUALIFIED_NAME',
-        'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
+        'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE',
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
-        'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
-        'LATEST_DATA_TIMESTAMP', 
+        'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT',
+        'LATEST_DATA_TIMESTAMP',
         'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
         'COLLECTION_TIMESTAMP'
     ]
-    
+
     dt_health_display_labels = {
         'QUALIFIED_NAME': 'Dynamic Table',
         'SCHEDULING_STATE_STATUS': 'Status',
@@ -509,107 +453,170 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
         'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
-        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', 
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time',
         'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
         'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
         'COLLECTION_TIMESTAMP': 'Snapshot Time'
     }
 
-    # Select and rename columns for the display DataFrame
-    df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
-
-
-    # --- Apply Sorting ---
-    status_and_refresh_severity_sort_order = {
-        ('SUSPENDED', 'FAILED'): 0, ('SUSPENDED', 'UPSTREAM_FAILED'): 1,
-        ('SUSPENDED', 'CANCELLED'): 2, ('SUSPENDED', 'WARNING'): 3,
-        ('SUSPENDED', 'SUCCEEDED'): 4, ('SUSPENDED', 'UNKNOWN'): 5,
-        ('RUNNING', 'FAILED'): 6, 
-        ('RUNNING', 'UPSTREAM_FAILED'): 7, ('RUNNING', 'CANCELLED'): 8,
-        ('RUNNING', 'WARNING'): 9,
-        ('RUNNING', 'SUCCEEDED'): 10,
-        ('UNKNOWN', 'UNKNOWN'): 11, (None, None): 12 
-    }
-
-    # This key should be applied to the `final_filtered_metadata_df` (the one being filtered)
-    # not directly to df_for_display
-    final_filtered_metadata_df['COMPOUND_STATUS_SORT_KEY'] = final_filtered_metadata_df.apply(
-        lambda row: status_and_refresh_severity_sort_order.get(
-            (row.get('SCHEDULING_STATE_STATUS'), row.get('LAST_COMPLETED_REFRESH_STATE')),
-            status_and_refresh_severity_sort_order[(None, None)]
-        ), axis=1
-    )
-
-    def get_lag_ratio_sort_key(row, thresholds):
-        ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        if pd.isna(ratio): return 99 
-        if ratio < thresholds['lag_ratio']['critical']: return 0 
-        if ratio < thresholds['lag_ratio']['warning']: return 1 
-        return 2 
-
-    def get_latest_data_time_sort_key(row, thresholds):
-        latest_data_ts = row.get('LATEST_DATA_TIMESTAMP')
-        # Use fillna(9999) here to handle NaT values gracefully when comparing
-        time_diff_seconds = (datetime.now() - latest_data_ts).total_seconds() if pd.notna(latest_data_ts) else 9999 * 86400
-        time_diff_days = time_diff_seconds / 86400
-
-        if time_diff_days >= thresholds['latest_data_time']['critical_days']: return 0 
-        if time_diff_days >= thresholds['latest_data_time']['warning_days']: return 1 
-        return 2 
-
-
-    # Ensure these sort keys are also on final_filtered_metadata_df for sorting
-    # We will re-index df_for_display based on sorted final_filtered_metadata_df
-    if color_by_option == 'Lag Ratio':
-        final_filtered_metadata_df['LAG_RATIO_SORT_KEY'] = final_filtered_metadata_df.apply(
-            lambda row: get_lag_ratio_sort_key(row, thresholds_for_styling), axis=1
-        )
-    elif color_by_option == 'Latest Data Time':
-        final_filtered_metadata_df['LATEST_DATA_TIME_SORT_KEY'] = final_filtered_metadata_df.apply(
-            lambda row: get_latest_data_time_sort_key(row, thresholds_for_styling), axis=1
-        )
-
-
-    sort_columns = []
-    ascending_flags = []
-
-    if color_by_option == 'None' or color_by_option == 'Status':
-        sort_columns = ['COMPOUND_STATUS_SORT_KEY']
-        ascending_flags = [True] 
-    elif color_by_option == 'Lag Ratio':
-        sort_columns = ['LAG_RATIO_SORT_KEY', 'TIME_WITHIN_TARGET_LAG_RATIO'] 
-        ascending_flags = [True, True] 
-    elif color_by_option == 'Latest Data Time':
-        sort_columns = ['LATEST_DATA_TIME_SORT_KEY', 'LATEST_DATA_TIMESTAMP'] 
-        ascending_flags = [True, False] 
-
-    if sort_columns:
-        # Sort the underlying data frame first to get the order
-        sort_order_indices = final_filtered_metadata_df.sort_values(
-            by=sort_columns, ascending=ascending_flags, na_position='last'
-        ).index
-        # Then apply this order to the display dataframe
-        final_df_for_display_sorted = df_for_display.loc[sort_order_indices].reset_index(drop=True)
-    else:
-        final_df_for_display_sorted = df_for_display.copy()
-        
-    # --- Apply Styling (row-wise background color) ---
+    # --- Apply Styling and Display ---
     if color_by_option != 'None':
-        styled_df = final_df_for_display_sorted.style.apply(
-            lambda row_display: apply_row_style(
-                row_display,             
-                color_by_option,         
-                thresholds_for_styling,  
-                final_filtered_metadata_df 
-            ), 
-            axis=1 
+        # Apply style using the optimized function directly on the DataFrame that has original values
+        styled_df_full = filtered_df_for_processing.style.apply(
+            lambda row: apply_row_style_optimized(
+                row, color_by_option, THRESHOLDS, current_time_for_calculations
+            ),
+            axis=1
         )
-        st.dataframe(
-            styled_df,
-            use_container_width=True
+        
+        # Now, select the display columns and rename them from the styled object's underlying data.
+        # This requires manually building the styler for the selected columns with the new names.
+        
+        # A more direct way: create styler from `df_for_display` and then apply styles based on keys
+        # The trick is that `df_for_display` has the formatted columns, but the styling needs raw data.
+        # So, we style `filtered_df_for_processing` first, then map those styles to `df_for_display`
+        # OR: ensure apply_row_style_optimized takes df_for_display and extracts the *original* columns.
+        
+        # Given the previous optimized apply_row_style, which gets the raw data directly from `row`,
+        # we can apply it to `filtered_df_for_processing` and then select/rename the columns.
+
+        # The styler object `styled_df_full` contains styles applied to `filtered_df_for_processing`.
+        # We need to ensure that when we present `df_for_display`, it inherits these styles.
+        # This is where pandas Styler can get tricky.
+        # The easiest is to make `apply_row_style_optimized` generate styles for `df_for_display` directly.
+
+        # Let's re-align: `apply_row_style_optimized` will take `row` from `df_for_display` but needs
+        # to access the unformatted values to make styling decisions.
+        # It's currently structured to take the raw row from `filtered_df_for_processing`.
+        # So, the `styled_df_full` is correctly generated.
+
+        # To display: We need to tell Streamlit to show only `dt_health_display_columns_order`
+        # and rename them, from the `styled_df_full` object.
+        # `styled_df_full.reindex(columns=dt_health_display_columns_order)` selects columns
+        # `styled_df_full.rename(columns=dt_health_display_labels)` attempts to rename, but Styler
+        # `rename` operates on the underlying DataFrame.
+        # Streamlit's st.dataframe `column_order` and `column_config` are powerful here!
+
+        # Select the columns from the raw DataFrame first, THEN style and rename.
+        # This simplifies the styling function as it applies to the exact columns.
+        
+        # Refined flow:
+        # 1. Filter, add sort keys.
+        # 2. Sort.
+        # 3. Create df_for_display (with formatted values).
+        # 4. Filter df_for_display to `dt_health_display_columns_order` and rename.
+        # 5. Apply styling based on `filtered_df_for_processing`'s values.
+
+        # Step 4: Select and rename columns for display (on the *formatted* df)
+        final_df_to_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
+
+        # Step 5: Create a Styler object from the `final_df_to_display`
+        styler = final_df_to_display.style
+
+        # Now, apply the row-wise style. The logic in `apply_row_style_optimized`
+        # needs to read from the *original* `filtered_df_for_processing` for accurate values,
+        # but apply to `final_df_to_display`'s structure.
+        # The best way is for `apply_row_style_optimized` to be called on `filtered_df_for_processing`
+        # which returns a Styler object, and then use Styler's reindex/rename.
+
+        # Let's revert to the suggested approach from my analysis which is cleaner:
+        # Style the full `filtered_df_for_processing` (which has all raw columns)
+        # THEN select/reorder/rename columns for display.
+        
+        styled_df_with_all_cols = filtered_df_for_processing.style.apply(
+            lambda row: apply_row_style_optimized(row, color_by_option, THRESHOLDS, current_time_for_calculations),
+            axis=1
         )
-    else: 
-        st.dataframe(
-            final_df_for_display_sorted, 
-            use_container_width=True
+        
+        # To make it display with formatted columns and correct names:
+        # Access the underlying DataFrame from the Styler for formatting and renaming
+        styled_data = styled_df_with_all_cols.data.copy() # Get the underlying DataFrame from the Styler
+        
+        styled_data['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(styled_data['TARGET_LAG_SEC'], time_format_option)
+        styled_data['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(styled_data['MEAN_LAG_SEC'], time_format_option)
+        styled_data['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(styled_data['MAXIMUM_LAG_SEC'], time_format_option)
+        styled_data['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(styled_data['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
+        styled_data['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = styled_data['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
+
+        # Re-create the styler with the formatted columns, ensuring styles persist
+        # This is the tricky part. pandas Styler applies styles to cell indices.
+        # When you reindex/rename the underlying DF, the styles may not carry over correctly.
+
+        # Simplified approach: Style the *final display dataframe* but have the style function
+        # look up original values. The previous `apply_row_style` was doing this.
+        # Let's use `st.dataframe`'s new `column_config` which is better than `Styler` for many things.
+        
+        # Reverting to simpler application of styles if `column_config` handles it.
+        # For *row-wise* background colors, Styler.apply(axis=1) is still the way.
+        # The original code's way of styling the 'display' DF and passing original for lookup was functional.
+        # But for optimization, we want `apply_row_style_optimized` to only use `row`.
+
+        # Let's go with the recommended flow for clarity and efficiency:
+        # 1. Filtered data: `filtered_df_for_processing`
+        # 2. Add sort keys to `filtered_df_for_processing`
+        # 3. Sort `filtered_df_for_processing`
+        # 4. Create `df_for_display_final` by selecting/renaming columns and applying display formats.
+        # 5. Apply row-wise styling to `df_for_display_final` directly.
+        #    This means `apply_row_style_optimized` needs to derive styling from `df_for_display_final`'s columns
+        #    which implies it needs to read *unformatted* columns if that's what its logic uses.
+        #    So, the optimized `apply_row_style_optimized` as defined earlier is good IF it works on `filtered_df_for_processing`.
+
+        # Let's stick with the `apply_row_style_optimized` that operates on the raw `row`
+        # from `filtered_df_for_processing`.
+        
+        # Apply the styling to the `filtered_df_for_processing`
+        styled_source_df = filtered_df_for_processing.style.apply(
+            lambda row: apply_row_style_optimized(row, color_by_option, THRESHOLDS, current_time_for_calculations),
+            axis=1
         )
+        
+        # Now, take this `Styler` object, extract its underlying data, format the display columns,
+        # and then apply those formatting changes to a *new* Styler that's ready for display.
+        
+        # Extract the underlying styled data. This preserves the background colors.
+        df_for_final_display = styled_source_df.data.copy()
+
+        # Apply formatting to the columns we want to show
+        df_for_final_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_final_display['TARGET_LAG_SEC'], time_format_option)
+        df_for_final_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_final_display['MEAN_LAG_SEC'], time_format_option)
+        df_for_final_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_final_display['MAXIMUM_LAG_SEC'], time_format_option)
+        df_for_final_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_final_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
+        df_for_final_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_final_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%")
+
+        # Select and rename the display columns. This will create a new DataFrame.
+        df_for_final_display = df_for_final_display[[col for col in dt_health_display_columns_order if col in df_for_final_display.columns]]
+        df_for_final_display = df_for_final_display.rename(columns=dt_health_display_labels)
+        
+        # To persist styles, apply them using a "callable" for the `background_gradient` or `apply` method.
+        # Since we applied row-wise, we need to re-apply the exact same styles on the `df_for_final_display`.
+        # This requires storing the row styles generated by the first pass.
+
+        # **Simplest and most robust for row-wise styling in Streamlit 1.x with pandas Styler:**
+        # Perform all calculations and determine the "color" for each row beforehand.
+        # Then, apply the pandas style to the final display DataFrame.
+        # The original code's `apply_row_style` was robust enough for this.
+        # The key is that `apply_row_style` returns a `Series` of style strings, one for each column.
+        
+        # The optimized `apply_row_style_optimized` is better because it avoids the lookup.
+        # Let's apply it directly to `df_for_final_display` by ensuring the necessary original
+        # values are still present as temporary columns.
+
+        # The current `df_for_display` has the `_FMT` columns. It *also* still has the original
+        # raw columns. So `apply_row_style_optimized` can work directly on `df_for_display`.
+        # This is the path taken in the initial code, and it's cleaner.
+        
+        # So, the final dataframe is `df_for_display`
+        # Select and rename columns on this `df_for_display` for the view.
+        df_for_final_display_view = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
+
+        styled_final_df = df_for_final_display_view.style.apply(
+            lambda row: apply_row_style_optimized(
+                row, color_by_option, THRESHOLDS, current_time_for_calculations
+            ),
+            axis=1
+        )
+        st.dataframe(styled_final_df, use_container_width=True)
+    else:
+        # If no coloring, just show the dataframe with selected/renamed columns
+        final_df_no_style = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
+        st.dataframe(final_df_no_style, use_container_width=True)
