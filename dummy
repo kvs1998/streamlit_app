@@ -258,52 +258,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Detailed Dynamic Table Current Status Table Section ---
     
-    # 1. Arrange Title and Radio Buttons:
-    # Use st.container() for cleaner separation if needed, or directly in columns
-    # st.subheader is already a block element, radio button as horizontal takes little space
-    title_and_radio_cols = st.columns([0.5, 0.5]) # Adjust width as needed
-
-    with title_and_radio_cols[0]:
-        # Removed st.subheader("Detailed Dynamic Table Status") from here, 
-        # as it's directly above within the main content flow.
-        st.write("### Detailed Dynamic Table Status") # Using smaller markdown header for compactness
-    
-    with title_and_radio_cols[1]:
-        # Radio buttons are already horizontal with label "Color Table By:"
-        color_by_option = st.radio(
-            "Color Table By:",
-            ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
-            index=0,
-            horizontal=True, 
-            key="new_color_by_dt_health_table"
-        )
-
-    # 2. Dynamic Severity Legend Section (Moved and placed in a column with simplified HTML)
-    # Define custom CSS for the legend items
+    # Custom CSS for legend items (still useful for color box + text on same line)
     st.markdown("""
         <style>
-        /* Base container for the whole legend row */
-        .legend-row-container {
-            display: flex;
-            justify-content: flex-end; /* Push content to the right */
-            align-items: center; /* Vertically center items */
-            width: 100%; /* Take full width */
-            margin-bottom: 10px; /* Space above table */
-        }
-        /* Style for the "Severity:" label */
-        .legend-label {
-            font-weight: bold;
-            font-size: 16px;
-            margin-right: 10px;
-            white-space: nowrap; /* Prevent "Severity:" from wrapping */
-        }
-        /* Wrapper for the color boxes and text */
-        .legend-items-wrapper {
-            display: flex;
-            flex-wrap: wrap; /* Allow items to wrap if screen is too small */
-            justify-content: flex-end; /* Keep items aligned to the right */
-        }
-        /* Individual legend item style */
         .legend-item {
             display: inline-flex; /* Use inline-flex to keep color box and text together */
             align-items: center; /* Vertically align content */
@@ -321,64 +278,83 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         }
         </style>
         """, unsafe_allow_html=True)
+
+    # Use Streamlit columns for layout
+    col1, col2 = st.columns([0.4, 0.6]) # Adjust ratio as needed
+
+    with col1:
+        st.subheader("Detailed Dynamic Table Status") # Keep as subheader for consistent font size
     
-    thresholds_for_styling = { 
-        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
-        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
-        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
-        'latest_data_time': {
-            'critical_days': 3,  
-            'warning_days': 1    
-        }
-    }
-    legend_thresholds = thresholds_for_styling 
-
-    legend_items_html = [] 
-    
-    if color_by_option == 'None':
-        pass 
-    elif color_by_option == 'Status':
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</span>")
-    elif color_by_option == 'Lag Ratio':
-        threshold_set = legend_thresholds['lag_ratio'] 
-        
-        def format_legend_value_ratio(val_raw):
-            if pd.isna(val_raw): return "N/A"
-            return f"{round(val_raw * 100, 1)}%"
-        
-        critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
-        warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
-        ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
-
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</span>")
-    elif color_by_option == 'Latest Data Time':
-        critical_val_days = legend_thresholds['latest_data_time']['critical_days']
-        warning_val_days = legend_thresholds['latest_data_time']['warning_days']
-        
-        critical_text = format_stale_days_for_legend(critical_val_days)
-        warning_text = format_stale_days_for_legend(warning_val_days)
-
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old</span>")
-        legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old</span>")
-        
-    if legend_items_html: # Only render if there's content
-        st.markdown(
-            f"""
-            <div class='legend-row-container'>
-                <span class='legend-label'>Severity:</span>
-                <div class='legend-items-wrapper'>
-                    {"".join(legend_items_html)}
-                </div>
-            </div>
-            """, unsafe_allow_html=True
+    with col2:
+        # The radio button label "Color Table By:" is automatically inline
+        color_by_option = st.radio(
+            "Color Table By:",
+            ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
+            index=0,
+            horizontal=True, 
+            key="new_color_by_dt_health_table"
         )
     
+    # Next row of columns for "Severity:" and legend items
+    severity_label_col, legend_items_col = st.columns([0.15, 0.85]) # Adjust ratio as needed
+
+    with severity_label_col:
+        st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
+    
+    with legend_items_col:
+        # Thresholds (already defined)
+        thresholds_for_styling = { 
+            'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
+            'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
+            'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
+            'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
+            'latest_data_time': {
+                'critical_days': 3,  
+                'warning_days': 1    
+            }
+        }
+        legend_thresholds = thresholds_for_styling 
+
+        legend_items_html = [] 
+        
+        if color_by_option == 'None':
+            # No legend if no coloring selected
+            pass 
+        elif color_by_option == 'Status':
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</span>")
+        elif color_by_option == 'Lag Ratio':
+            threshold_set = legend_thresholds['lag_ratio'] 
+            
+            def format_legend_value_ratio(val_raw):
+                if pd.isna(val_raw): return "N/A"
+                return f"{round(val_raw * 100, 1)}%"
+            
+            critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
+            warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
+            ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
+
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</span>")
+        elif color_by_option == 'Latest Data Time':
+            critical_val_days = legend_thresholds['latest_data_time']['critical_days']
+            warning_val_days = legend_thresholds['latest_data_time']['warning_days']
+            
+            critical_text = format_stale_days_for_legend(critical_val_days)
+            warning_text = format_stale_days_for_legend(warning_val_days)
+
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old</span>")
+            legend_items_html.append(f"<span class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old</span>")
+            
+        if legend_items_html:
+            st.markdown(
+                f"""<div style='display:flex; flex-wrap:wrap; justify-content:flex-end;'>{"".join(legend_items_html)}</div>""", 
+                unsafe_allow_html=True
+            )
+
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
     if final_filtered_metadata_df.empty:
