@@ -31,7 +31,7 @@ def format_seconds_to_readable(seconds_series, format_type):
             if s == 0: return "0s"
 
             days = int(s // 86400)
-            hours = int((s % 86400) // 3600) # Corrected modulo for hours calculation
+            hours = int((s % 86400) // 3600)
             minutes = int((s % 3600) // 60)
             seconds = s % 60
             
@@ -45,15 +45,14 @@ def format_seconds_to_readable(seconds_series, format_type):
             
             return " ".join(parts) if parts else "0s"
         return numeric_series.apply(mix_format)
-    return numeric_series.astype(str) # Fallback to string if type is unknown
+    return numeric_series.astype(str)
 
 
 # --- Helper function for Legend text formatting (scalar value) ---
-# This is a specialized helper for generating legend text like "1 day", "3 days"
-# It should NOT be used for formatting the DataFrame column itself.
 def format_stale_days_for_legend(days_value):
     if pd.isna(days_value): return "N/A"
-    if days_value == 1: return "1 day"
+    # Adjust for cleaner "day" vs "days" pluralization for legend
+    if days_value <= 1: return f"<{days_value} day" if days_value < 1 else "1 day" # e.g. "< 1 day"
     return f"{int(days_value)} days"
 
 
@@ -121,13 +120,16 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
             style_str = f'background-color: {BG_COLOR_NONE}'
         else:
             try:
-                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 
+                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 # Age in days
                 
-                if time_diff_days >= thresholds['latest_data_time']['critical']:
+                # Check critical first (oldest data)
+                if time_diff_days >= thresholds['latest_data_time']['critical_days']:
                     style_str = f'background-color: {BG_COLOR_CRITICAL}'
-                elif time_diff_days >= thresholds['latest_data_time']['warning']:
+                # Then check warning (moderately old)
+                elif time_diff_days >= thresholds['latest_data_time']['warning_days']:
                     style_str = f'background-color: {BG_COLOR_WARNING}'
-                else:
+                # Otherwise, it's good (fresh)
+                else: # i.e., time_diff_days < warning_days (which is 1 day in the new scheme)
                     style_str = f'background-color: {BG_COLOR_GOOD}'
             except Exception: 
                 style_str = f'background-color: {BG_COLOR_NONE}'
@@ -296,12 +298,17 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         </style>
         """, unsafe_allow_html=True)
     
+    # Redefining thresholds for clearer ranges and aligning with the 'days' concept
     thresholds_for_styling = { 
-        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
-        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
-        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
-        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
-        'latest_data_time': {'ok': 1, 'warning': 3, 'critical': 7}
+        'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
+        'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds
+        'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds
+        'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, # 90%, 70%, 1%
+        'latest_data_time': {
+            'critical_days': 3,  # Data >= 3 days old is Critical
+            'warning_days': 1    # Data >= 1 day old (but <3 days) is Warning
+                                 # Data < 1 day old is Good
+        }
     }
     legend_thresholds = thresholds_for_styling 
 
@@ -332,16 +339,18 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</div>
         """
     elif color_by_option == 'Latest Data Time':
-        threshold_set = legend_thresholds['latest_data_time'] 
+        critical_val_days = legend_thresholds['latest_data_time']['critical_days']
+        warning_val_days = legend_thresholds['latest_data_time']['warning_days']
         
-        critical_val_fmt = format_stale_days_for_legend(threshold_set['critical'])
-        warning_val_fmt = format_stale_days_for_legend(threshold_set['warning'])
-        ok_val_fmt = format_stale_days_for_legend(threshold_set['ok'])
+        # Use the specialized helper for legend text for clarity
+        critical_text = format_stale_days_for_legend(critical_val_days)
+        warning_text = format_stale_days_for_legend(warning_val_days)
 
+        # Updated legend text to reflect the clearer ranges
         legend_content = f"""
-            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (>= {critical_val_fmt})</div>
-            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (>= {warning_val_fmt})</div>
-            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (< {ok_val_fmt})</div>
+            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older</div>
+            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old</div>
+            <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old</div>
         """
         
     if legend_content:
@@ -370,7 +379,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
-    # REMOVED df_for_display['LATEST_DATA_TIMESTAMP_FMT'] and will use raw LATEST_DATA_TIMESTAMP below
+    # LATEST_DATA_TIMESTAMP is now directly used; no _FMT column for it anymore
 
 
     # Define display columns and their labels
@@ -379,7 +388,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
-        'LATEST_DATA_TIMESTAMP', # Use the original timestamp column directly
+        'LATEST_DATA_TIMESTAMP', # Using the original timestamp for display
         'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
         'COLLECTION_TIMESTAMP'
     ]
@@ -393,15 +402,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
         'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
-        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', # Changed label back to just "Latest Data Time"
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', # Renamed without FMT suffix for display
         'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
         'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
         'COLLECTION_TIMESTAMP': 'Snapshot Time'
     }
 
     # Select and rename columns for the display DataFrame
-    # Ensure all columns in dt_health_display_columns_order exist in df_for_display before selecting
-    # And specifically rename 'LATEST_DATA_TIMESTAMP' without a '_FMT' suffix
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
 
 
