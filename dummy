@@ -44,79 +44,81 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
-# Helper function for ROW-WISE conditional formatting
-# --- FIX: Added time_format_option to function signature ---
-def apply_row_style(row_display_data, row_original_data, color_by_option, thresholds, time_format_option):
+# Helper function to compute row-wise styles based on original data and apply them to display df
+def generate_row_styles_df(final_filtered_metadata_df, display_df_columns, color_by_option, thresholds, time_format_option):
     """
-    Applies background color to the entire row based on the selected metric and its thresholds.
-    Returns a Pandas Series of CSS style strings, with index matching DataFrame column names.
-    - row_display_data: A row from the DataFrame being styled, with display labels.
-    - row_original_data: A corresponding row from the original filtered_metadata_df, with original column names and numeric values.
-    - time_format_option: Passed for consistency in case it was needed for formatting within style logic.
+    Generates a DataFrame of CSS style strings for each cell, based on row-wise logic.
+    This DataFrame will have the same shape and index as the final display DataFrame.
     """
-    style_str = BG_COLOR_NONE # Default to white (no explicit color)
+    # Initialize a DataFrame of empty strings for styles, matching the target display shape
+    df_styles = pd.DataFrame('', index=final_filtered_metadata_df.index, columns=display_df_columns)
 
-    if color_by_option == 'Status':
-        status = row_original_data.get('SCHEDULING_STATE_STATUS')
-        last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
+    for idx, row_original_data in final_filtered_metadata_df.iterrows():
+        style_str = BG_COLOR_NONE # Default to white/no color for rows not explicitly styled
 
-        if status == 'SUSPENDED':
-            style_str = f'background-color: {BG_COLOR_INFO}' # Informational state
-        elif last_refresh_state == 'FAILED': # Failed is critical regardless of RUNNING status
-            style_str = f'background-color: {BG_COLOR_CRITICAL}' # Critical failure
-        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
-            style_str = f'background-color: {BG_COLOR_WARNING}' # Warning states
-        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
-            style_str = f'background-color: {BG_COLOR_GOOD}' # Healthy running
-        else: # Default for other 'Status' combinations not explicitly handled, assume good
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+        if color_by_option == 'Status':
+            status = row_original_data.get('SCHEDULING_STATE_STATUS')
+            last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
 
-    elif color_by_option == 'Mean Lag':
-        lag = row_original_data.get('MEAN_LAG_SEC')
-        if pd.isna(lag):
-            style_str = f'background-color: {BG_COLOR_NONE}' # Explicitly white for NaN
-        elif lag >= thresholds['mean_lag']['critical']:
-            style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif lag >= thresholds['mean_lag']['warning']:
-            style_str = f'background-color: {BG_COLOR_WARNING}'
-        else: # Below warning threshold is good
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+            if status == 'SUSPENDED':
+                style_str = f'background-color: {BG_COLOR_INFO}'
+            elif last_refresh_state == 'FAILED':
+                style_str = f'background-color: {BG_COLOR_CRITICAL}'
+            elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
+                style_str = f'background-color: {BG_COLOR_GOOD}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}' # Default other statuses to good
 
-    elif color_by_option == 'Max Lag':
-        lag = row_original_data.get('MAXIMUM_LAG_SEC')
-        if pd.isna(lag):
-            style_str = f'background-color: {BG_COLOR_NONE}' # Explicitly white for NaN
-        elif lag >= thresholds['max_lag']['critical']:
-            style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif lag >= thresholds['max_lag']['warning']:
-            style_str = f'background-color: {BG_COLOR_WARNING}'
-        else:
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+        elif color_by_option == 'Mean Lag':
+            lag = row_original_data.get('MEAN_LAG_SEC')
+            if pd.isna(lag):
+                style_str = f'background-color: {BG_COLOR_NONE}'
+            elif lag >= thresholds['mean_lag']['critical']:
+                style_str = f'background-color: {BG_COLOR_CRITICAL}'
+            elif lag >= thresholds['mean_lag']['warning']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}'
 
-    elif color_by_option == 'Time Above Target Lag':
-        time_above = row_original_data.get('TIME_ABOVE_TARGET_LAG_SEC')
-        if pd.isna(time_above):
-            style_str = f'background-color: {BG_COLOR_NONE}' # Explicitly white for NaN
-        elif time_above > thresholds['time_above']['critical']:
-            style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif time_above > thresholds['time_above']['warning']:
-            style_str = f'background-color: {BG_COLOR_WARNING}'
-        else:
-            style_str = f'background-color: {BG_COLOR_GOOD}'
+        elif color_by_option == 'Max Lag':
+            lag = row_original_data.get('MAXIMUM_LAG_SEC')
+            if pd.isna(lag):
+                style_str = f'background-color: {BG_COLOR_NONE}'
+            elif lag >= thresholds['max_lag']['critical']:
+                style_str = f'background-color: {BG_COLOR_CRITICAL}'
+            elif lag >= thresholds['max_lag']['warning']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}'
 
-    elif color_by_option == 'Lag Ratio':
-        ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
-        if pd.isna(ratio):
-            style_str = f'background-color: {BG_COLOR_NONE}' # Explicitly white for NaN
-        elif ratio < thresholds['lag_ratio']['critical']: # Lower ratio is worse
-            style_str = f'background-color: {BG_COLOR_CRITICAL}'
-        elif ratio < thresholds['lag_ratio']['warning']:
-            style_str = f'background-color: {BG_COLOR_WARNING}'
-        else: # High ratio is good
-            style_str = f'background-color: {BG_COLOR_GOOD}'
-    
-    # Return a Series with the exact column index of the DataFrame being styled
-    return pd.Series(style_str, index=row_display_data.index)
+        elif color_by_option == 'Time Above Target Lag':
+            time_above = row_original_data.get('TIME_ABOVE_TARGET_LAG_SEC')
+            if pd.isna(time_above):
+                style_str = f'background-color: {BG_COLOR_NONE}'
+            elif time_above > thresholds['time_above']['critical']:
+                style_str = f'background-color: {BG_COLOR_CRITICAL}'
+            elif time_above > thresholds['time_above']['warning']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}'
+
+        elif color_by_option == 'Lag Ratio':
+            ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
+            if pd.isna(ratio):
+                style_str = f'background-color: {BG_COLOR_NONE}'
+            elif ratio < thresholds['lag_ratio']['critical']: # Lower ratio is worse
+                style_str = f'background-color: {BG_COLOR_CRITICAL}'
+            elif ratio < thresholds['lag_ratio']['warning']:
+                style_str = f'background-color: {BG_COLOR_WARNING}'
+            else:
+                style_str = f'background-color: {BG_COLOR_GOOD}'
+        
+        # Assign the determined style string to all columns in the current row of df_styles
+        df_styles.loc[idx] = style_str
+
+    return df_styles
 
 
 # --- REMOVED get_active_dt_names_from_snowflake function ---
@@ -391,6 +393,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     
     # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
+    # This ensures consistency in both formatting and threshold checks.
+    # Note: final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] is NOT changed here.
+    # It retains original nans for apply_row_style and sorting to handle (if needed).
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
 
 
@@ -439,7 +444,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     if sort_column_original_name:
         if sort_column_original_name != 'SCHEDULING_STATE_STATUS': # Sort numeric columns directly
-            ascending = True if color_by_option == 'Lag Ratio' else False
+            ascending = True if color_by_option == 'Lag Ratio' else False # Lag Ratio: lower is worse, so sort ASC. Others: DESC.
             
             sort_order_indices = final_filtered_metadata_df.sort_values(
                 by=sort_column_original_name, ascending=ascending, na_position='last'
@@ -479,7 +484,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
                 row_display, # Pass the row from the display DataFrame (has display labels)
-                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(), # Pass original row via index lookup
+                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(dtype='object'), # Pass original row via index lookup
                 color_by_option,
                 thresholds_for_styling, # Pass the specific thresholds for styling
                 time_format_option # Pass time_format_option
