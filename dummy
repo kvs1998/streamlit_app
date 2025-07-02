@@ -44,31 +44,31 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
-# Helper function for ROW-WISE conditional formatting (moved to global scope)
-# This function is called by df.style.apply(axis=1), so 'row' is a pandas Series representing one row
-# of the DataFrame *being styled* (final_df_for_display_sorted).
-# It needs `original_df_metadata` to lookup original numeric values using QUALIFIED_NAME.
-def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time_format_option):
+# Helper function for ROW-WISE conditional formatting
+# This function receives a ROW from the DataFrame it's styling (final_df_for_display_sorted).
+# It uses 'original_df_full_data' to lookup the corresponding original data.
+def apply_row_style(row_from_display_df, color_by_option, thresholds, original_df_full_data, time_format_option):
     """
     Applies background color to the entire row based on the selected metric and its thresholds.
-    - row: A row from the DataFrame being styled (final_df_for_display_sorted), with display labels.
-    - color_by_option, thresholds, original_df_metadata, time_format_option: Passed as args from lambda.
+    - row_from_display_df: A row from the DataFrame being styled (final_df_for_display_sorted), with display labels.
+    - color_by_option, thresholds, time_format_option: Styling parameters.
+    - original_df_full_data: The complete DataFrame with original column names (final_filtered_metadata_df).
     """
-    # Lookup the corresponding row from the original metadata_df using the 'Dynamic Table' column (QUALIFIED_NAME).
-    # 'Dynamic Table' is the display label for 'QUALIFIED_NAME'
-    original_qualified_name_from_display_row = row.get('Dynamic Table')
     
+    # --- FIX: Robustly get the original row data ---
+    # Use the 'Dynamic Table' value (which holds the original QUALIFIED_NAME) for lookup.
+    # This is the most reliable identifier across different DF versions/indices.
+    current_qualified_name = row_from_display_df.get('Dynamic Table')
+
     row_original_data = pd.Series(dtype='object') # Default to empty Series
     
-    # --- FIX: Robust lookup of original row by QUALIFIED_NAME ---
-    # This ensures we get the row from original_df_metadata based on the unique identifier (QUALIFIED_NAME).
-    if original_qualified_name_from_display_row and \
-       'QUALIFIED_NAME' in original_df_metadata.columns and \
-       original_qualified_name_from_display_row in original_df_metadata['QUALIFIED_NAME'].values:
+    # Ensure original_df_full_data is a DataFrame and has 'QUALIFIED_NAME'
+    if isinstance(original_df_full_data, pd.DataFrame) and \
+       'QUALIFIED_NAME' in original_df_full_data.columns and \
+       current_qualified_name in original_df_full_data['QUALIFIED_NAME'].values:
         
-        # Use boolean indexing to find the row, then .iloc[0] to get the Series
-        row_original_data = original_df_metadata[
-            original_df_metadata['QUALIFIED_NAME'] == original_qualified_name_from_display_row
+        row_original_data = original_df_full_data[
+            original_df_full_data['QUALIFIED_NAME'] == current_qualified_name
         ].iloc[0]
     # --- END FIX ---
 
@@ -135,7 +135,7 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    return pd.Series(style_str, index=row.index)
+    return pd.Series(style_str, index=row.index) # Return Series with same index as input row
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -426,7 +426,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     
-    # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
+    # Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
 
 
@@ -446,7 +446,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
         'MEAN_LAG_SEC_FMT': 'Mean Lag',
-        'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
+        'MAXIMUM_LAG_SEC_FMT': 'Max Tag', # Fix typo: 'Max Tag' to 'Max Lag'
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
         'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
         'LATEST_DATA_TIMESTAMP': 'Latest Data Time',
@@ -512,17 +512,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
-        # Apply row-wise style using lambda, passing necessary arguments.
-        # This lambda ensures apply_row_style gets the original data for checks.
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                row_display,
-                # Lookup the original row by its unique QUALIFIED_NAME value (from 'Dynamic Table' display column)
-                final_filtered_metadata_df.loc[
-                    final_filtered_metadata_df['QUALIFIED_NAME'] == row_display['Dynamic Table']
-                ].iloc[0] if row_display['Dynamic Table'] in final_filtered_metadata_df['QUALIFIED_NAME'].values else pd.Series(dtype='object'),
+                row_display, # Pass the row from the display DataFrame (has display labels)
+                # Pass the complete final_filtered_metadata_df for original data lookup
+                final_filtered_metadata_df, # Pass the full DataFrame here
                 color_by_option,
-                thresholds_for_styling,
+                thresholds_for_styling, # Pass the specific thresholds for styling
                 time_format_option
             ), 
             axis=1 # Apply row-wise
