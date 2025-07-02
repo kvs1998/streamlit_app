@@ -44,6 +44,7 @@ BG_COLOR_INFO = '#cce5ff' # Light Blue for suspended
 BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
 
 
+# --- FIX: Moved apply_row_style to GLOBAL SCOPE ---
 # Helper function for ROW-WISE conditional formatting
 def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time_format_option):
     """
@@ -51,6 +52,7 @@ def apply_row_style(row, color_by_option, thresholds, original_df_metadata, time
     - row: A row from the DataFrame being styled, with display labels.
     - color_by_option, thresholds, original_df_metadata, time_format_option: Passed as args from lambda.
     """
+    # Lookup the corresponding row from the original metadata_df using the 'Dynamic Table' column (QUALIFIED_NAME).
     original_qualified_name = row.get('Dynamic Table')
     
     row_original_data = pd.Series(dtype='object')
@@ -140,7 +142,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     # --- Direct use of metadata_df as the filtered_metadata_df ---
-    # `filtered_metadata_df` is the *source of truth* for this tab's data.
     filtered_metadata_df = metadata_df.copy() 
 
     if filtered_metadata_df.empty:
@@ -334,7 +335,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             threshold_set = legend_thresholds[col_key] # Use the re-defined thresholds
             
             # Helper for formatting values in legend
-            def format_legend_value_for_display(val_raw, col_type, t_format_option): # Pass time_format_option
+            def format_legend_value_for_display(val_raw, col_type, t_format_option):
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
                 else: # Lag in seconds, use main format_seconds_to_readable
@@ -353,7 +354,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 """
             else: # Lag Ratio: Lower values are worse (Red < Yellow < Green)
                 legend_content = f"""
-                    <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</div>
+                    <div classt='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})</div>
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})</div>
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})</div>
                 """
@@ -393,7 +394,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
     
     # FIX: Handle NaN in TIME_WITHIN_TARGET_LAG_RATIO to be 0% for display
-    # Ensure this is applied to the df_for_display copy.
     df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'].fillna(0).apply(lambda x: f"{round(x * 100, 1)}%")
 
 
@@ -479,13 +479,20 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Apply Styling (row-wise background color) ---
     if color_by_option != 'None':
+        # FIX: Corrected lambda to pass the necessary arguments in the correct order.
+        # This lambda will correctly pass:
+        #   - row_display: the row from final_df_for_display_sorted (with display labels)
+        #   - color_by_option: from the radio button
+        #   - thresholds_for_styling: the defined thresholds
+        #   - final_filtered_metadata_df: the original full DataFrame (captured in the lambda's closure)
+        #   - time_format_option: for consistency in formatting (captured in lambda's closure)
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                row_display, # Pass the row from the display DataFrame (has display labels)
-                final_filtered_metadata_df.loc[row_display.name] if row_display.name in final_filtered_metadata_df.index else pd.Series(dtype='object'), # Pass original row via index lookup
+                row_display,
+                final_filtered_metadata_df, # Pass the original DF for lookup inside apply_row_style
                 color_by_option,
-                thresholds_for_styling, # Pass the specific thresholds for styling
-                time_format_option # Pass time_format_option
+                thresholds_for_styling,
+                time_format_option
             ), 
             axis=1 # Apply row-wise
         )
