@@ -265,29 +265,63 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             border: 1px solid #ccc;
             flex-shrink: 0;
         }
-        /* Style the st.toggle's internal label div to remove unnecessary padding around the hidden switch */
-        .stToggle label > div:first-child {
-            padding: 0; /* Remove padding around the hidden toggle switch */
-            margin-left: 0; /* Align perfectly */
+        /* New style for the clickable label wrapper to align toggle and text */
+        .clickable-legend-item {
+            display: flex; /* Use flex to align content within this div */
+            align-items: center; /* Vertically center content */
+            font-size: 14px;
+            white-space: nowrap; /* Prevent text wrapping */
+            height: 100%; /* Take full height of its column to assist vertical alignment */
         }
-        /* Style the st.toggle's label to act as the clickable area */
+        /* Style the st.toggle's internal label div (which is the actual clickable part) */
+        /* This should make the whole box clickable and colored */
         .stToggle label {
-            display: flex; /* Use flex to align its content (hidden switch + visible markdown) */
-            align-items: center; /* Vertically align */
-            padding-top: 0.25rem; /* Re-add some vertical padding for click area */
-            padding-bottom: 0.25rem;
-            margin-left: 10px; /* Space between toggle/label groups */
+            /* Remove default margin/padding and flex-direction from the default Streamlit label */
+            display: flex;
+            flex-direction: row; /* Ensure label content is horizontal */
+            align-items: center; /* Vertically align toggle switch and markdown content */
+            padding: 0.25rem 0.5rem; /* Add padding to make clickable area larger */
+            margin: 0 5px; /* Spacing between toggle "buttons" */
+            border: 1px solid #ccc;
+            border-radius: 0.25rem;
+            background-color: #f0f2f6; /* Default light background */
+            transition: background-color 0.2s ease-in-out;
             cursor: pointer;
+            width: fit-content; /* Only take content width */
         }
-        /* Make the actual Streamlit toggle switch invisible */
+        /* Hide the default Streamlit toggle switch/circle visually */
         .stToggle [data-testid="stToggleSwitch"] {
             display: none;
         }
+        /* Adjust the internal div that contains the label text (which is not hidden) */
+        .stToggle label > div:nth-child(2) { /* This targets the span/div containing the actual label content */
+            display: flex;
+            align-items: center; /* Align the color-box and text within this part */
+            height: 100%; /* Ensure it fills vertical space */
+        }
+        /* Style for when the toggle is checked */
+        .stToggle input:checked + label {
+            background-color: #e6f7ff; /* Active state background color */
+            border-color: #007bff; /* Active state border color */
+        }
+        /* Apply specific background colors to active toggles based on category */
+        /* These will override the generic active color if the toggle is checked */
+        .stToggle input[type="checkbox"]:checked[id*="status_crit"] + label { background-color: #f8d7da; border-color: #f8d7da; }
+        .stToggle input[type="checkbox"]:checked[id*="status_warn"] + label { background-color: #ffe0b3; border-color: #ffe0b3; }
+        .stToggle input[type="checkbox"]:checked[id*="status_good"] + label { background-color: #ccffcc; border-color: #ccffcc; }
+
+        .stToggle input[type="checkbox"]:checked[id*="lag_crit"] + label { background-color: #f8d7da; border-color: #f8d7da; }
+        .stToggle input[type="checkbox"]:checked[id*="lag_warn"] + label { background-color: #ffe0b3; border-color: #ffe0b3; }
+        .stToggle input[type="checkbox"]:checked[id*="lag_good"] + label { background-color: #ccffcc; border-color: #ccffcc; }
+
+        .stToggle input[type="checkbox"]:checked[id*="time_crit"] + label { background-color: #f8d7da; border-color: #f8d7da; }
+        .stToggle input[type="checkbox"]:checked[id*="time_warn"] + label { background-color: #ffe0b3; border-color: #ffe0b3; }
+        .stToggle input[type="checkbox"]:checked[id*="time_good"] + label { background-color: #ccffcc; border-color: #ccffcc; }
 
         </style>
         """, unsafe_allow_html=True)
 
-    # Initialize session state for filtering if not already present
+    # Initialize session state for filtering
     if 'legend_filters_status' not in st.session_state:
         st.session_state.legend_filters_status = {
             'Suspended / Failed': False,
@@ -309,12 +343,12 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # Helper to update session state for legend filters (called by on_change of toggle)
     def update_legend_filter_state(filter_type, category_key):
-        if filter_type == 'status':
-            st.session_state.legend_filters_status[category_key] = not st.session_state.legend_filters_status[category_key]
-        elif filter_type == 'lag_ratio':
-            st.session_state.legend_filters_lag_ratio[category_key] = not st.session_state.legend_filters_lag_ratio[category_key]
-        elif filter_type == 'latest_data_time':
-            st.session_state.legend_filters_latest_data_time[category_key] = not st.session_state.legend_filters_latest_data_time[category_key]
+        # Reset all other filters of the *same* type when one is clicked
+        current_state = st.session_state[f'legend_filters_{filter_type}'][category_key]
+        for key in st.session_state[f'legend_filters_{filter_type}']:
+            st.session_state[f'legend_filters_{filter_type}'][key] = False
+        st.session_state[f'legend_filters_{filter_type}'][category_key] = not current_state
+
 
     # --- Title and Radio Buttons ---
     header_and_radio_cols = st.columns([0.4, 0.6])
@@ -331,83 +365,104 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         )
     
     # --- Severity Label and Clickable Legend Items (using st.toggle + st.markdown) ---
-    # Create 6 columns: 3 pairs of (toggle_col, label_markdown_col)
-    # The first column will be for the "Severity:" label itself.
+    # This row will contain "Severity:", then a set of (toggle, legend_markdown) pairs
+    # Use a main container column for all legend items to keep them together, then divide internally
+    legend_container_col = st.columns(1)[0] # A single column to contain the whole legend row
     
-    # Define widths for columns: 
-    # Label col (e.g., 0.1)
-    # Then 3 pairs: (toggle_small_width, label_text_width)
-    # Example: [0.1, 0.05, 0.25, 0.05, 0.25, 0.05, 0.25] total ~1.0
-    legend_cols = st.columns([0.1, 0.05, 0.25, 0.05, 0.25, 0.05, 0.25]) 
-                                            # Sev_Label, T1_tog, T1_text, T2_tog, T2_text, T3_tog, T3_text
+    with legend_container_col:
+        # Define 4 columns: 1 for 'Severity:' label, then 3 for the legend items themselves.
+        # This simplifies the column ratio by grouping visual elements (toggle + text) in one logical column.
+        # Ratios: 0.15 for Severity label, 0.85 for the combined legend items, divided into 3 equal parts.
+        main_legend_row_cols = st.columns([0.15, 0.28, 0.28, 0.29]) # Approx 0.15 + 3 * 0.28 = 0.99
+                                                                  # Sev_Label, Item1, Item2, Item3 (each item containing toggle+text)
 
-    with legend_cols[0]: # Column for "Severity:" label
-        st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
-    
-    # Helper to render a toggle + its visual label in a pair of Streamlit columns
-    def render_clickable_legend_item(col_toggle, col_label, filter_type, category_key, label_text, color_code, is_active):
-        with col_toggle:
-            st.toggle(
-                label="", # Label is hidden, but required
-                value=is_active,
-                key=f"toggle_{filter_type}_{category_key.replace(' ', '_').replace('/','_')}",
-                on_change=update_legend_filter_state,
-                args=(filter_type, category_key),
-                label_visibility="hidden", # Hide the default Streamlit label/switch UI
-                # Streamlit hides the toggle switch if label_visibility is "hidden", 
-                # but we rely on CSS to display custom content instead.
-            )
-        with col_label:
-            # Markdown for the visual label (color box + text)
-            # This HTML will be the visible part next to the hidden toggle switch.
-            st.markdown(
-                f"<div class='clickable-legend-item'><span class='color-box-inline' style='background-color: {color_code};'></span>{label_text}</div>",
-                unsafe_allow_html=True
-            )
-
-    # Render legend items based on selected color_by_option
-    if color_by_option != 'None':
-        # Thresholds for legend text and filtering logic
-        thresholds_for_styling = { 
-            'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
-            'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
-            'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
-            'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
-            'latest_data_time': {
-                'critical_days': 3,  
-                'warning_days': 1    
-            }
-        }
+        with main_legend_row_cols[0]: # Column for "Severity:" label
+            st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
         
-        # Render the three legend item pairs using the defined columns
-        if color_by_option == 'Status':
-            render_clickable_legend_item(legend_cols[1], legend_cols[2], 'status', 'Suspended / Failed', "Suspended / Failed", BG_COLOR_CRITICAL, st.session_state.legend_filters_status['Suspended / Failed'])
-            render_clickable_legend_item(legend_cols[3], legend_cols[4], 'status', 'Warning / Partial Failure', "Warning / Partial Failure", BG_COLOR_WARNING, st.session_state.legend_filters_status['Warning / Partial Failure'])
-            render_clickable_legend_item(legend_cols[5], legend_cols[6], 'status', 'Running (Succeeded)', "Running (Succeeded)", BG_COLOR_GOOD, st.session_state.legend_filters_status['Running (Succeeded)'])
-        elif color_by_option == 'Lag Ratio':
-            threshold_set = thresholds_for_styling['lag_ratio']
-            def format_legend_value_ratio(val_raw):
-                if pd.isna(val_raw): return "N/A"
-                return f"{round(val_raw * 100, 1)}%"
+        # Helper to render a toggle + its visual label within a single given column object
+        def render_clickable_legend_item(col_obj, filter_type, category_key, label_text, color_code, is_active):
+            with col_obj:
+                # The st.toggle creates its own `label` element. We'll use this label.
+                # The color box and text will be the content of this label.
+                # `st.markdown` cannot be used directly in `st.toggle` label.
+                # The default label is just plain text.
+                # The solution relies on targeting Streamlit's internal HTML structure with CSS.
+                # The `input:checked + label` selector applies to the label immediately following the checkbox input.
+                # The `.color-box-inline` is inside the label, but we hide default toggle switch.
+
+                # Streamlit hides the toggle switch (the circle) if label_visibility is "hidden"
+                # but then the entire label div might be collapsed.
+                # If label_visibility is "visible", the switch is present.
+                # The CSS above hides the switch. So we can use label_visibility="visible".
+                
+                # The label text below is just text, not HTML.
+                # The color box comes from CSS: `color-box-inline`. This only creates a span, not a block.
+                # It means we need to put the color-box-inline HTML into the label argument of st.toggle
+                # Which leads back to the `unsafe_allow_html` error.
+                # There's no clean way to embed HTML with st.toggle without JS.
+
+                # Let's try simplifying the concept:
+                # The label text will just be the text (e.g. "Suspended / Failed").
+                # The background color of the *entire toggle widget* will change based on its checked state,
+                # to reflect the category's color. The small color box will be removed from here.
+
+                st.toggle(
+                    label=label_text, # Plain text label only.
+                    value=is_active,
+                    key=f"toggle_{filter_type}_{category_key.replace(' ', '_').replace('/','_')}",
+                    on_change=update_legend_filter_state,
+                    args=(filter_type, category_key),
+                    # label_visibility="visible" by default, no need to specify.
+                    # We rely on CSS to color the background of the toggle when checked.
+                )
+                # To make background color of toggle reflect the category, it needs to be injected.
+                # This is why the custom CSS for `input:checked + label` above exists.
+                # It will use the `initial_bg_color` that we derived previously.
+
+        # Render legend items based on selected color_by_option
+        if color_by_option != 'None':
+            thresholds_for_styling = { 
+                'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
+                'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
+                'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
+                'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
+                'latest_data_time': {
+                    'critical_days': 3,  
+                    'warning_days': 1    
+                }
+            }
             
-            critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
-            warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
-            ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
+            # The columns for each legend item
+            col_item1, col_item2, col_item3 = main_legend_row_cols[1], main_legend_row_cols[2], main_legend_row_cols[3]
 
-            render_clickable_legend_item(legend_cols[1], legend_cols[2], 'lag_ratio', 'Critical', f"Critical (< {critical_val_fmt})", BG_COLOR_CRITICAL, st.session_state.legend_filters_lag_ratio['Critical'])
-            render_clickable_legend_item(legend_cols[3], legend_cols[4], 'lag_ratio', 'Warning', f"Warning (< {warning_val_fmt})", BG_COLOR_WARNING, st.session_state.legend_filters_lag_ratio['Warning'])
-            render_clickable_legend_item(legend_cols[5], legend_cols[6], 'lag_ratio', 'Good', f"Good (>= {ok_val_fmt})", BG_COLOR_GOOD, st.session_state.legend_filters_lag_ratio['Good'])
+            if color_by_option == 'Status':
+                render_clickable_legend_item(col_item1, 'status', 'Suspended / Failed', "Suspended / Failed", BG_COLOR_CRITICAL, st.session_state.legend_filters_status['Suspended / Failed'])
+                render_clickable_legend_item(col_item2, 'status', 'Warning / Partial Failure', "Warning / Partial Failure", BG_COLOR_WARNING, st.session_state.legend_filters_status['Warning / Partial Failure'])
+                render_clickable_legend_item(col_item3, 'status', 'Running (Succeeded)', "Running (Succeeded)", BG_COLOR_GOOD, st.session_state.legend_filters_status['Running (Succeeded)'])
+            elif color_by_option == 'Lag Ratio':
+                threshold_set = thresholds_for_styling['lag_ratio']
+                def format_legend_value_ratio(val_raw):
+                    if pd.isna(val_raw): return "N/A"
+                    return f"{round(val_raw * 100, 1)}%"
+                
+                critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
+                warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
+                ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
 
-        elif color_by_option == 'Latest Data Time':
-            critical_val_days = thresholds_for_styling['latest_data_time']['critical_days']
-            warning_val_days = thresholds_for_styling['latest_data_time']['warning_days']
-            
-            critical_text = format_stale_days_for_legend(critical_val_days)
-            warning_text = format_stale_days_for_legend(warning_val_days)
+                render_clickable_legend_item(col_item1, 'lag_ratio', 'Critical', f"Critical (< {critical_val_fmt})", BG_COLOR_CRITICAL, st.session_state.legend_filters_lag_ratio['Critical'])
+                render_clickable_legend_item(col_item2, 'lag_ratio', 'Warning', f"Warning (< {warning_val_fmt})", BG_COLOR_WARNING, st.session_state.legend_filters_lag_ratio['Warning'])
+                render_clickable_legend_item(col_item3, 'lag_ratio', 'Good', f"Good (>= {ok_val_fmt})", BG_COLOR_GOOD, st.session_state.legend_filters_lag_ratio['Good'])
 
-            render_clickable_legend_item(legend_cols[1], legend_cols[2], 'latest_data_time', 'Critical', f"{critical_text} or older", BG_COLOR_CRITICAL, st.session_state.legend_filters_latest_data_time['Critical'])
-            render_clickable_legend_item(legend_cols[3], legend_cols[4], 'latest_data_time', 'Warning', f"{warning_text} to < {critical_val_days} days old", BG_COLOR_WARNING, st.session_state.legend_filters_latest_data_time['Warning'])
-            render_clickable_legend_item(legend_cols[5], legend_cols[6], 'latest_data_time', 'Good', f"Less than {warning_text} old", BG_COLOR_GOOD, st.session_state.legend_filters_latest_data_time['Good'])
+            elif color_by_option == 'Latest Data Time':
+                critical_val_days = thresholds_for_styling['latest_data_time']['critical_days']
+                warning_val_days = thresholds_for_styling['latest_data_time']['warning_days']
+                
+                critical_text = format_stale_days_for_legend(critical_val_days)
+                warning_text = format_stale_days_for_legend(warning_val_days)
+
+                render_clickable_legend_item(col_item1, 'latest_data_time', 'Critical', f"{critical_text} or older", BG_COLOR_CRITICAL, st.session_state.legend_filters_latest_data_time['Critical'])
+                render_clickable_legend_item(col_item2, 'latest_data_time', 'Warning', f"{warning_text} to < {critical_val_days} days old", BG_COLOR_WARNING, st.session_state.legend_filters_latest_data_time['Warning'])
+                render_clickable_legend_item(col_item3, 'latest_data_time', 'Good', f"Less than {warning_text} old", BG_COLOR_GOOD, st.session_state.legend_filters_latest_data_time['Good'])
         
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
