@@ -135,7 +135,9 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
         else:
             style_str = f'background-color: {BG_COLOR_GOOD}'
     
-    return pd.Series(style_str, index=row.index) # Return Series with same index as input row
+    # Return Series with same index as input row,
+    # filled with the determined style string for all columns
+    return pd.Series(style_str, index=row_from_display_df.index)
 
 
 def render_dt_health_tab(metadata_df: pd.DataFrame):
@@ -446,7 +448,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
         'TARGET_LAG_SEC_FMT': 'Target Lag',
         'MEAN_LAG_SEC_FMT': 'Mean Lag',
-        'MAXIMUM_LAG_SEC_FMT': 'Max Tag', # Fix typo: 'Max Tag' to 'Max Lag'
+        'MAXIMUM_LAG_SEC_FMT': 'Max Lag', # Corrected typo here
         'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
         'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
         'LATEST_DATA_TIMESTAMP': 'Latest Data Time',
@@ -514,12 +516,11 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     if color_by_option != 'None':
         styled_df = final_df_for_display_sorted.style.apply(
             lambda row_display: apply_row_style(
-                row_display, # Pass the row from the display DataFrame (has display labels)
-                # Pass the complete final_filtered_metadata_df for original data lookup
-                final_filtered_metadata_df, # Pass the full DataFrame here
-                color_by_option,
-                thresholds_for_styling, # Pass the specific thresholds for styling
-                time_format_option
+                row_display,             # `row_from_display_df`
+                color_by_option,         # `color_by_option`
+                thresholds_for_styling,  # `thresholds`
+                final_filtered_metadata_df, # `original_df_full_data`
+                time_format_option       # `time_format_option`
             ), 
             axis=1 # Apply row-wise
         )
