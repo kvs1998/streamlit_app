@@ -89,7 +89,7 @@ def apply_row_style(row_from_display_df, color_by_option, thresholds, original_d
             style_str = f'background-color: {BG_COLOR_WARNING}'
         elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED':
             style_str = f'background-color: {BG_COLOR_GOOD}'
-        else:
+        else: # Default for other or unknown states, assume good if not explicitly bad
             style_str = f'background-color: {BG_COLOR_GOOD}'
 
     elif color_by_option == 'Lag Ratio':
@@ -252,15 +252,35 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
     # --- Detailed Dynamic Table Current Status Table Section ---
     
-    # Custom CSS for legend items (still useful for color box + text on same line)
+    # Custom CSS for legend items (to style the st.toggle widgets)
     st.markdown("""
         <style>
-        .legend-item {
-            display: inline-flex;
+        .stToggle label {
+            /* Keep original Streamlit toggle structure, but modify its appearance */
+            padding: 0.1rem 0.5rem; /* Reduced padding to make them look like compact buttons */
+            margin: 0 5px; /* Spacing between toggle "buttons" */
+            border-radius: 0.25rem; /* Rounded corners */
+            border: 1px solid #ccc; /* Subtle border */
+            background-color: #f0f2f6; /* Light background by default */
+            transition: all 0.2s ease-in-out;
+            cursor: pointer;
+            justify-content: center; /* Center the content inside the label */
+        }
+        /* Style when toggle is checked (active) */
+        .stToggle input:checked + label {
+            background-color: #e6f7ff; /* A subtle blue tint for active filter */
+            border-color: #007bff; /* Blue border for active */
+            color: #212529; /* Darker text */
+        }
+        /* Hide the default Streamlit toggle switch/circle */
+        .stToggle label > div:first-child {
+            display: none;
+        }
+        /* Ensure the span with color-box and text aligns correctly */
+        .stToggle label span {
+            display: flex;
             align-items: center;
-            margin-left: 15px; /* Spacing between items */
-            font-size: 14px;
-            white-space: nowrap; /* Prevent text wrapping within item */
+            line-height: 1; /* Adjust line height for vertical alignment */
         }
         .color-box {
             width: 15px;
@@ -269,27 +289,22 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             display: inline-block;
             margin-right: 5px;
             border: 1px solid #ccc;
+            flex-shrink: 0; /* Prevent color box from shrinking */
         }
-        /* Style for the clickable toggles */
-        .stToggle>label:hover { /* Hover effect */
-            cursor: pointer;
-            background-color: #f0f2f6; /* A subtle hover */
-            border-radius: 5px;
-        }
-        /* Make the toggle itself invisible but functional */
-        .stToggle>label>div:first-child {
-            display: none; /* Hide the default toggle circle */
-        }
-        /* Adjust alignment of label content */
-        .stToggle>label {
-            display: flex;
+        .severity-label {
+            font-weight: bold;
+            font-size: 16px;
+            white-space: nowrap;
+            display: flex; /* Use flex to align with toggles if needed in same row */
             align-items: center;
-            padding: 2px 5px; /* Adjust padding for button-like appearance */
+            margin-right: 10px; /* Space before first toggle */
+            height: 38px; /* Approximate height of a st.toggle to align vertically */
         }
         </style>
         """, unsafe_allow_html=True)
 
-    # Store legend filter states in session_state
+    # Initialize session state for filtering if not already present
+    # We do this here, before potentially getting their values in st.toggle
     if 'legend_filters_status' not in st.session_state:
         st.session_state.legend_filters_status = {
             'Suspended / Failed': False,
@@ -309,20 +324,22 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             'Good': False
         }
 
-    # Helper to update session state for legend filters
-    def update_legend_filter(category_key, value):
-        if color_by_option == 'Status':
-            st.session_state.legend_filters_status[category_key] = value
-        elif color_by_option == 'Lag Ratio':
-            st.session_state.legend_filters_lag_ratio[category_key] = value
-        elif color_by_option == 'Latest Data Time':
-            st.session_state.legend_filters_latest_data_time[category_key] = value
+    # Helper function to update session state for legend filters (called by on_change)
+    def update_legend_filter(filter_type, category_key):
+        if filter_type == 'status':
+            st.session_state.legend_filters_status[category_key] = not st.session_state.legend_filters_status[category_key]
+        elif filter_type == 'lag_ratio':
+            st.session_state.legend_filters_lag_ratio[category_key] = not st.session_state.legend_filters_lag_ratio[category_key]
+        elif filter_type == 'latest_data_time':
+            st.session_state.legend_filters_latest_data_time[category_key] = not st.session_state.legend_filters_latest_data_time[category_key]
 
-    # --- Title and Radio Buttons ---
-    title_and_radio_cols = st.columns([0.5, 0.5]) 
-    with title_and_radio_cols[0]:
-        st.subheader("Detailed Dynamic Table Status") 
-    with title_and_radio_cols[1]:
+
+    # --- Title and Radio Buttons (Now in one logical row) ---
+    header_and_radio_cols = st.columns([0.4, 0.6]) # Adjust width as needed
+    with header_and_radio_cols[0]:
+        st.subheader("Detailed Dynamic Table Status")
+    
+    with header_and_radio_cols[1]:
         color_by_option = st.radio(
             "Color Table By:",
             ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
@@ -331,13 +348,14 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             key="new_color_by_dt_health_table"
         )
     
-    # --- Severity Label and Legend Items (using st.toggle) ---
-    severity_row_cols = st.columns([0.15, 0.85]) # Adjust ratio as needed
-    with severity_row_cols[0]:
-        st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
+    # --- Severity Label and Clickable Legend Items ---
+    severity_and_legend_cols = st.columns([0.15, 0.85]) # Adjust ratio to align 'Severity:' with first toggle
     
-    with severity_row_cols[1]:
-        # Thresholds (already defined)
+    with severity_and_legend_cols[0]:
+        st.markdown("<span class='severity-label'>Severity:</span>", unsafe_allow_html=True)
+    
+    with severity_and_legend_cols[1]:
+        # Thresholds for legend text and filtering logic
         thresholds_for_styling = { 
             'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
             'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
@@ -348,131 +366,137 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 'warning_days': 1    
             }
         }
-        legend_thresholds = thresholds_for_styling 
+        
+        # Using st.container() with columns to ensure horizontal layout for toggles
+        legend_toggles_container = st.container()
+        if color_by_option != 'None':
+            # Create columns within the container for the toggles
+            col_crit, col_warn, col_good = legend_toggles_container.columns(3)
 
-        # Display legend items as clickable toggles based on selected color_by_option
-        if color_by_option == 'None':
-            st.empty() # No legend displayed
-        elif color_by_option == 'Status':
-            col_crit, col_warn, col_good = st.columns(3)
-            with col_crit:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed",
-                    value=st.session_state.legend_filters_status['Suspended / Failed'],
-                    key="toggle_status_critical",
-                    on_change=update_legend_filter,
-                    args=('Suspended / Failed', not st.session_state.legend_filters_status['Suspended / Failed']),
-                    help="Show only Suspended or FAILED tables.",
-                    label_visibility="hidden" # Hide default label, use HTML label
-                )
-            with col_warn:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure",
-                    value=st.session_state.legend_filters_status['Warning / Partial Failure'],
-                    key="toggle_status_warning",
-                    on_change=update_legend_filter,
-                    args=('Warning / Partial Failure', not st.session_state.legend_filters_status['Warning / Partial Failure']),
-                    help="Show only Warning or Partially Failing tables.",
-                    label_visibility="hidden"
-                )
-            with col_good:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)",
-                    value=st.session_state.legend_filters_status['Running (Succeeded)'],
-                    key="toggle_status_good",
-                    on_change=update_legend_filter,
-                    args=('Running (Succeeded)', not st.session_state.legend_filters_status['Running (Succeeded)']),
-                    help="Show only Running and Succeeded tables.",
-                    label_visibility="hidden"
-                )
-        elif color_by_option == 'Lag Ratio':
-            threshold_set = legend_thresholds['lag_ratio']
-            def format_legend_value_ratio(val_raw):
-                if pd.isna(val_raw): return "N/A"
-                return f"{round(val_raw * 100, 1)}%"
-            
-            critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
-            warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
-            ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
+            if color_by_option == 'Status':
+                with col_crit:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed",
+                        value=st.session_state.legend_filters_status['Suspended / Failed'],
+                        key="toggle_status_critical",
+                        on_change=update_legend_filter,
+                        args=('status', 'Suspended / Failed'), # Pass filter type and category key
+                        unsafe_allow_html=True # IMPORTANT: Allow HTML in label
+                    )
+                with col_warn:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure",
+                        value=st.session_state.legend_filters_status['Warning / Partial Failure'],
+                        key="toggle_status_warning",
+                        on_change=update_legend_filter,
+                        args=('status', 'Warning / Partial Failure'),
+                        unsafe_allow_html=True
+                    )
+                with col_good:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)",
+                        value=st.session_state.legend_filters_status['Running (Succeeded)'],
+                        key="toggle_status_good",
+                        on_change=update_legend_filter,
+                        args=('status', 'Running (Succeeded)'),
+                        unsafe_allow_html=True
+                    )
+            elif color_by_option == 'Lag Ratio':
+                threshold_set = thresholds_for_styling['lag_ratio']
+                def format_legend_value_ratio(val_raw):
+                    if pd.isna(val_raw): return "N/A"
+                    return f"{round(val_raw * 100, 1)}%"
+                
+                critical_val_fmt = format_legend_value_ratio(threshold_set['critical'])
+                warning_val_fmt = format_legend_value_ratio(threshold_set['warning'])
+                ok_val_fmt = format_legend_value_ratio(threshold_set['ok'])
 
-            col_crit, col_warn, col_good = st.columns(3)
-            with col_crit:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})",
-                    value=st.session_state.legend_filters_lag_ratio['Critical'],
-                    key="toggle_lag_ratio_critical",
-                    on_change=update_legend_filter,
-                    args=('Critical', not st.session_state.legend_filters_lag_ratio['Critical']),
-                    label_visibility="hidden"
-                )
-            with col_warn:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})",
-                    value=st.session_state.legend_filters_lag_ratio['Warning'],
-                    key="toggle_lag_ratio_warning",
-                    on_change=update_legend_filter,
-                    args=('Warning', not st.session_state.legend_filters_lag_ratio['Warning']),
-                    label_visibility="hidden"
-                )
-            with col_good:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})",
-                    value=st.session_state.legend_filters_lag_ratio['Good'],
-                    key="toggle_lag_ratio_good",
-                    on_change=update_legend_filter,
-                    args=('Good', not st.session_state.legend_filters_lag_ratio['Good']),
-                    label_visibility="hidden"
-                )
+                with col_crit:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})",
+                        value=st.session_state.legend_filters_lag_ratio['Critical'],
+                        key="toggle_lag_ratio_critical",
+                        on_change=update_legend_filter,
+                        args=('lag_ratio', 'Critical'),
+                        unsafe_allow_html=True
+                    )
+                with col_warn:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})",
+                        value=st.session_state.legend_filters_lag_ratio['Warning'],
+                        key="toggle_lag_ratio_warning",
+                        on_change=update_legend_filter,
+                        args=('lag_ratio', 'Warning'),
+                        unsafe_allow_html=True
+                    )
+                with col_good:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})",
+                        value=st.session_state.legend_filters_lag_ratio['Good'],
+                        key="toggle_lag_ratio_good",
+                        on_change=update_legend_filter,
+                        args=('lag_ratio', 'Good'),
+                        unsafe_allow_html=True
+                    )
+            elif color_by_option == 'Latest Data Time':
+                critical_val_days = thresholds_for_styling['latest_data_time']['critical_days']
+                warning_val_days = thresholds_for_styling['latest_data_time']['warning_days']
+                
+                critical_text = format_stale_days_for_legend(critical_val_days)
+                warning_text = format_stale_days_for_legend(warning_val_days)
 
-        elif color_by_option == 'Latest Data Time':
-            critical_val_days = legend_thresholds['latest_data_time']['critical_days']
-            warning_val_days = legend_thresholds['latest_data_time']['warning_days']
-            
-            critical_text = format_stale_days_for_legend(critical_val_days)
-            warning_text = format_stale_days_for_legend(warning_val_days)
-
-            col_crit, col_warn, col_good = st.columns(3)
-            with col_crit:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older",
-                    value=st.session_state.legend_filters_latest_data_time['Critical'],
-                    key="toggle_time_critical",
-                    on_change=update_legend_filter,
-                    args=('Critical', not st.session_state.legend_filters_latest_data_time['Critical']),
-                    label_visibility="hidden"
-                )
-            with col_warn:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old",
-                    value=st.session_state.legend_filters_latest_data_time['Warning'],
-                    key="toggle_time_warning",
-                    on_change=update_legend_filter,
-                    args=('Warning', not st.session_state.legend_filters_latest_data_time['Warning']),
-                    label_visibility="hidden"
-                )
-            with col_good:
-                st.toggle(
-                    label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old",
-                    value=st.session_state.legend_filters_latest_data_time['Good'],
-                    key="toggle_time_good",
-                    on_change=update_legend_filter,
-                    args=('Good', not st.session_state.legend_filters_latest_data_time['Good']),
-                    label_visibility="hidden"
-                )
+                with col_crit:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older",
+                        value=st.session_state.legend_filters_latest_data_time['Critical'],
+                        key="toggle_time_critical",
+                        on_change=update_legend_filter,
+                        args=('latest_data_time', 'Critical'),
+                        unsafe_allow_html=True
+                    )
+                with col_warn:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old",
+                        value=st.session_state.legend_filters_latest_data_time['Warning'],
+                        key="toggle_time_warning",
+                        on_change=update_legend_filter,
+                        args=('latest_data_time', 'Warning'),
+                        unsafe_allow_html=True
+                    )
+                with col_good:
+                    st.toggle(
+                        label=f"<span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old",
+                        value=st.session_state.legend_filters_latest_data_time['Good'],
+                        key="toggle_time_good",
+                        on_change=update_legend_filter,
+                        args=('latest_data_time', 'Good'),
+                        unsafe_allow_html=True
+                    )
         
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
     if final_filtered_metadata_df.empty:
-        st.info("No detailed dynamic table status to display based on current filters.", icon="ℹ️")
+        st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
         return
 
     # --- Apply Legend Filters to the DataFrame ---
-    # Start with the full filtered_metadata_df
+    # Start with the full filtered_metadata_df (already filtered by selectboxes above)
     filtered_by_legend_df = final_filtered_metadata_df.copy()
 
-    if color_by_option == 'Status':
+    # Reset all filters if "None" is selected
+    if color_by_option == 'None':
+        # No specific legend filters apply, so don't filter `filtered_by_legend_df` further
+        # Also, reset all legend toggles to False
+        for key in st.session_state.legend_filters_status:
+            st.session_state.legend_filters_status[key] = False
+        for key in st.session_state.legend_filters_lag_ratio:
+            st.session_state.legend_filters_lag_ratio[key] = False
+        for key in st.session_state.legend_filters_latest_data_time:
+            st.session_state.legend_filters_latest_data_time[key] = False
+
+    elif color_by_option == 'Status':
         active_filters = [k for k, v in st.session_state.legend_filters_status.items() if v]
-        if active_filters: # If any filter is active
+        if active_filters: 
             status_conditions = []
             if 'Suspended / Failed' in active_filters:
                 status_conditions.append(
@@ -490,38 +514,55 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 )
             
             if status_conditions:
-                # Combine conditions with OR
                 combined_condition = status_conditions[0]
                 for cond in status_conditions[1:]:
                     combined_condition = combined_condition | cond
                 filtered_by_legend_df = filtered_by_legend_df[combined_condition]
-            else: # If no filter is selected, but 'Status' is chosen, show nothing
-                  # Or, if you want to show ALL when nothing is explicitly selected for legend, remove this else.
-                  # For now, if no legend item is selected, show empty table based on status filter
-                filtered_by_legend_df = pd.DataFrame(columns=filtered_by_legend_df.columns)
-
+            else: 
+                # If no legend filter selected for Status, but 'Status' is chosen, show ALL status types
+                # To achieve this, don't apply any filter here if active_filters is empty.
+                pass 
 
     elif color_by_option == 'Lag Ratio':
         active_filters = [k for k, v in st.session_state.legend_filters_lag_ratio.items() if v]
         if active_filters:
             lag_ratio_conditions = []
+            
+            # Map legend category names to actual numeric ranges using thresholds_for_styling
             if 'Critical' in active_filters:
                 lag_ratio_conditions.append(filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['critical'])
             if 'Warning' in active_filters:
+                # Warning range: >= warning_threshold_value AND < critical_threshold_value
                 lag_ratio_conditions.append(
-                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['critical']) &
-                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['warning'])
+                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['critical']) & # From critical. It seems you intended this to be low for critical?
+                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['warning']) # To warning threshold
+                )
+                # Correction based on your legend: Critical (< 1.0%), Warning (< 70.0%), Good (>= 90.0%)
+                # This implies:
+                # Critical: ratio < 0.01
+                # Warning: 0.01 <= ratio < 0.70
+                # Good: ratio >= 0.70
+                # Let's adjust filtering ranges here to match the legend text's interpretation of thresholds
+            
+            # Recalculating conditions for Lag Ratio based on legend's implicit ranges:
+            lag_ratio_actual_conditions = []
+            if 'Critical' in active_filters:
+                lag_ratio_actual_conditions.append(filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['critical']) # < 0.01
+            if 'Warning' in active_filters:
+                lag_ratio_actual_conditions.append(
+                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['critical']) & # >= 0.01
+                    (filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['warning']) # < 0.70
                 )
             if 'Good' in active_filters:
-                lag_ratio_conditions.append(filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['warning'])
+                lag_ratio_actual_conditions.append(filtered_by_legend_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['warning']) # >= 0.70
             
-            if lag_ratio_conditions:
-                combined_condition = lag_ratio_conditions[0]
-                for cond in lag_ratio_conditions[1:]:
+            if lag_ratio_actual_conditions:
+                combined_condition = lag_ratio_actual_conditions[0]
+                for cond in lag_ratio_actual_conditions[1:]:
                     combined_condition = combined_condition | cond
                 filtered_by_legend_df = filtered_by_legend_df[combined_condition]
             else:
-                filtered_by_legend_df = pd.DataFrame(columns=filtered_by_legend_df.columns)
+                pass # Show all if no legend filter selected for this mode
 
     elif color_by_option == 'Latest Data Time':
         active_filters = [k for k, v in st.session_state.legend_filters_latest_data_time.items() if v]
@@ -531,19 +572,16 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             # Calculate time_diff_days for each row, handle NaT (Not a Time)
             filtered_by_legend_df['temp_time_diff_days'] = (datetime.now() - filtered_by_legend_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400
             
+            # Recalculating conditions for Latest Data Time based on legend's implicit ranges:
             if 'Critical' in active_filters:
-                latest_data_conditions.append(
-                    filtered_by_legend_df['temp_time_diff_days'] >= thresholds_for_styling['latest_data_time']['critical_days']
-                )
+                latest_data_conditions.append(filtered_by_legend_df['temp_time_diff_days'] >= thresholds_for_styling['latest_data_time']['critical_days']) # >= 3 days
             if 'Warning' in active_filters:
                 latest_data_conditions.append(
-                    (filtered_by_legend_df['temp_time_diff_days'] >= thresholds_for_styling['latest_data_time']['warning_days']) &
-                    (filtered_by_legend_df['temp_time_diff_days'] < thresholds_for_styling['latest_data_time']['critical_days'])
+                    (filtered_by_legend_df['temp_time_diff_days'] >= thresholds_for_styling['latest_data_time']['warning_days']) & # >= 1 day
+                    (filtered_by_legend_df['temp_time_diff_days'] < thresholds_for_styling['latest_data_time']['critical_days']) # < 3 days
                 )
             if 'Good' in active_filters:
-                latest_data_conditions.append(
-                    filtered_by_legend_df['temp_time_diff_days'] < thresholds_for_styling['latest_data_time']['warning_days']
-                )
+                latest_data_conditions.append(filtered_by_legend_df['temp_time_diff_days'] < thresholds_for_styling['latest_data_time']['warning_days']) # < 1 day
             
             if latest_data_conditions:
                 combined_condition = latest_data_conditions[0]
@@ -551,19 +589,18 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                     combined_condition = combined_condition | cond
                 filtered_by_legend_df = filtered_by_legend_df[combined_condition]
             else:
-                filtered_by_legend_df = pd.DataFrame(columns=filtered_by_legend_df.columns)
+                pass # Show all if no legend filter selected for this mode
 
             filtered_by_legend_df = filtered_by_legend_df.drop(columns=['temp_time_diff_days']) # Clean up temp column
         
-
-    # --- Use filtered_by_legend_df as the base for display ---
-    df_for_display = filtered_by_legend_df.copy()
-    
-    # Check if df_for_display is empty after legend filtering
-    if df_for_display.empty:
+    # --- Check if df_for_display is empty after legend filtering ---
+    if filtered_by_legend_df.empty:
         st.info("No data available based on current legend selections. Please adjust your legend filters.", icon="ℹ️")
         return
 
+    # --- Use filtered_by_legend_df as the base for final display and sorting ---
+    df_for_display = filtered_by_legend_df.copy()
+    
     # Apply formatting for display to new columns
     df_for_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TARGET_LAG_SEC'], time_format_option)
     df_for_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MEAN_LAG_SEC'], time_format_option)
@@ -614,7 +651,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         ('UNKNOWN', 'UNKNOWN'): 11, (None, None): 12 
     }
 
-    # Use filtered_by_legend_df for sorting as it's the most up-to-date filtered data
+    # Use the filtered_by_legend_df as the basis for sorting logic keys
     filtered_by_legend_df['COMPOUND_STATUS_SORT_KEY'] = filtered_by_legend_df.apply(
         lambda row: status_and_refresh_severity_sort_order.get(
             (row.get('SCHEDULING_STATE_STATUS'), row.get('LAST_COMPLETED_REFRESH_STATE')),
@@ -659,7 +696,8 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         ascending_flags = [True, True] 
 
     if sort_columns:
-        sort_order_indices = filtered_by_legend_df.sort_values( # Use filtered_by_legend_df for sorting
+        # Sort using the potentially filtered_by_legend_df's data and new sort keys
+        sort_order_indices = filtered_by_legend_df.sort_values(
             by=sort_columns, ascending=ascending_flags, na_position='last'
         ).index
         final_df_for_display_sorted = df_for_display.loc[sort_order_indices].reset_index(drop=True)
@@ -671,7 +709,9 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 row_display,             
                 color_by_option,         
                 thresholds_for_styling,  
-                final_filtered_metadata_df # Pass original (un-legend-filtered) data for accurate color lookup
+                # Pass the UNFILTERED metadata_df so the styling logic has access to all original data for lookup,
+                # even if the row was included by legend filtering.
+                final_filtered_metadata_df 
             ), 
             axis=1 
         )
