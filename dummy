@@ -303,29 +303,26 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     # Generate dynamic range labels for numeric options
     legend_content = ""
     # Define thresholds for legend generation. This ensures consistency with apply_row_style.
-    thresholds_for_styling = { # Renamed to be consistent
+    thresholds_for_styling = { 
         'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600}, # seconds
         'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200}, # seconds (kept for `apply_row_style` logic)
         'time_above': {'ok': 0, 'warning': 300, 'critical': 1800}, # seconds (kept for `apply_row_style` logic)
         'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01} # 90%, 70%, 1%
     }
-    # Using 'thresholds_for_styling' for legend generation too
-    legend_thresholds = thresholds_for_styling # Alias for clarity in this section
+    legend_thresholds = thresholds_for_styling 
 
     
     if color_by_option == 'None':
         legend_content = "" # No legend if no coloring
     elif color_by_option == 'Status':
-        # UPDATED LEGEND BASED ON NEW COLOR LOGIC
         legend_content = f"""
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)</div>
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure</div>
             <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed</div>
         """
-    else: # Numeric options: Mean Lag, Max Lag, Time Above Target Lag, Lag Ratio
-        col_key = { # Map radio button label to internal threshold key
+    else: # Numeric options: Mean Lag, Lag Ratio
+        col_key = { 
             'Mean Lag': 'mean_lag',
-            # Removed 'Max Lag' and 'Time Above Target Lag' from this map
             'Lag Ratio': 'lag_ratio'
         }.get(color_by_option)
 
@@ -333,19 +330,18 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             threshold_set = legend_thresholds[col_key] 
             
             # Helper for formatting values in legend
-            def format_legend_value_for_display(val_raw, col_type, t_format_option):
+            def format_legend_value_for_display_scalar(val_raw, col_type, t_format_option):
                 if pd.isna(val_raw): return "N/A"
                 if col_type == 'Lag Ratio':
                     return f"{round(val_raw * 100, 1)}%"
-                else: # Lag in seconds, use main format_seconds_to_readable
-                    # Ensure it's passed as a Series to format_seconds_to_readable
+                else: 
                     return format_seconds_to_readable(pd.Series([val_raw]), t_format_option).iloc[0]
             
-            critical_val_fmt = format_legend_value_for_display(threshold_set['critical'], color_by_option, time_format_option)
-            warning_val_fmt = format_legend_value_for_display(threshold_set['warning'], color_by_option, time_format_option)
-            ok_val_fmt = format_legend_value_for_display(threshold_set['ok'], color_by_option, time_format_option)
+            critical_val_fmt = format_legend_value_for_display_scalar(threshold_set['critical'], color_by_option, time_format_option)
+            warning_val_fmt = format_legend_value_for_display_scalar(threshold_set['warning'], color_by_option, time_format_option)
+            ok_val_fmt = format_legend_value_for_display_scalar(threshold_set['ok'], color_by_option, time_format_option)
 
-            if color_by_option in ['Mean Lag']: # Only Mean Lag left for this category
+            if color_by_option in ['Mean Lag']: 
                 # Higher values are worse (Red > Yellow > Green)
                 legend_content = f"""
                     <div class='legend-item'><span class='color-box' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (> {critical_val_fmt})</div>
@@ -428,13 +424,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     original_sort_column_map = {
         'Status': 'SCHEDULING_STATE_STATUS',
         'Mean Lag': 'MEAN_LAG_SEC',
-        'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO' # Updated map
+        'Lag Ratio': 'TIME_WITHIN_TARGET_LAG_RATIO' 
     }
     
     sort_column_original_name = original_sort_column_map.get(color_by_option)
 
     if sort_column_original_name:
-        if sort_column_original_name not in ['SCHEDULING_STATE_STATUS']: # Only Status needs special sorting
+        if sort_column_original_name not in ['SCHEDULING_STATE_STATUS']: 
             ascending = True if color_by_option == 'Lag Ratio' else False
             
             sort_order_indices = final_filtered_metadata_df.sort_values(
@@ -442,20 +438,18 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             ).index
             final_df_for_display_sorted = final_df_for_display_sorted.loc[sort_order_indices].reset_index(drop=True)
             
-        else: # Custom sort for 'Status' column (SCHEDULING_STATE_STATUS) based on severity
-              # We need to sort by both SCHEDULING_STATE_STATUS and LAST_COMPLETED_REFRESH_STATE
+        else: 
             status_severity_order = {
-                'SUSPENDED': 0, # Highest severity: Suspended
-                'RUNNING': 1,   # Running comes next, then sub-sort by last_refresh_state
-                'UNKNOWN': 99   # Unknown last
+                'SUSPENDED': 0, 
+                'RUNNING': 1,   
+                'UNKNOWN': 99   
             }
-            # Map last refresh state to severity for secondary sorting (for RUNNING tables)
             refresh_state_severity_order = {
-                'FAILED': 0,          # Failed for Running tables
+                'FAILED': 0,          
                 'UPSTREAM_FAILED': 1,
                 'CANCELLED': 2,
                 'WARNING': 3,
-                'SUCCEEDED': 4,       # Succeeded last
+                'SUCCEEDED': 4,       
                 'UNKNOWN': 99
             }
             
@@ -464,7 +458,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 'Last_Refresh_State_Key': final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].map(refresh_state_severity_order).fillna(99)
             }, index=final_filtered_metadata_df.index)
 
-            # Combine sorting by primary scheduling status and then by refresh state
             sort_order_indices = temp_sort_df.sort_values(
                 by=['Scheduling_Status_Key', 'Last_Refresh_State_Key'], ascending=[True, True]
             ).index
