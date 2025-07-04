@@ -1,33 +1,5 @@
-    with filter_cols_dt_health_row2_domain[0]:
-        # Options for Domain Name should be based on base_filtered_df (after DB/Schema/Table filters)
-        temp_df_for_domain_options = base_filtered_df.copy()
-        if selected_database_dt_health != 'All':
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['DATABASE_NAME'] == selected_database_dt_health].copy()
-        if selected_schema_dt_health != 'All':
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
-        if selected_table_dt_health and 'All' not in selected_table_dt_health:
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['TABLE_NAME'].isin(selected_table_dt_health)].copy()
-
-        if not temp_df_for_domain_options.empty:
-            all_domain_names = ['All'] + sorted(temp_df_for_domain_options['DOMAIN_NAME'].unique().tolist())
-        else:
-            all_domain_names = ['All']
-            st.info("No Domain Names found for current selections.", icon="ℹ️")
-        selected_domain_name = st.selectbox(
-            "Domain Name:", options=all_domain_names, key="new_domain_filter_dt_health"
-        )
-
-    with filter_cols_dt_health_row2_domain[1]:
-        # Options for Sub Domain Name should be based on previous filters including Domain Name
-        temp_df_for_subdomain_options = temp_df_for_domain_options.copy() # Starts from df filtered by DB/Schema/Table
-        if selected_domain_name != 'All':
-            temp_df_for_subdomain_options = temp_df_for_subdomain_options[temp_df_for_subdomain_options['DOMAIN_NAME'] == selected_domain_name].copy()
-
-        if not temp_df_for_subdomain_options.empty:
-            all_sub_domain_names = ['All'] + sorted(temp_df_for_subdomain_options['SUB_DOMAIN_NAME'].unique().tolist())
-        else:
-            all_sub_domain_names = ['All']
-            st.info("No Sub Domain Names found for current selections.", icon="ℹ️")
-        selected_sub_domain_name = st.selectbox(
-            "Sub Domain Name:", options=all_sub_domain_names, key="new_subdomain_filter_dt_health"
-        )
+    # NEW: Apply Domain and Sub Domain filters
+    if selected_domain_name != 'All':
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DOMAIN_NAME'] == selected_domain_name].copy()
+    if selected_sub_domain_name != 'All':
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SUB_DOMAIN_NAME'] == selected_sub_domain_name].copy()
