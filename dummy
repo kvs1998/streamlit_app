@@ -1,4 +1,99 @@
-    # Data Preprocessing (Unchanged)
+# tabs/dt_health_tab.py
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# --- Helper functions (unchanged) ---
+def format_seconds_to_readable(seconds_series, format_type):
+    if not isinstance(seconds_series, pd.Series):
+        seconds_series = pd.Series([seconds_series])
+    numeric_series = pd.to_numeric(seconds_series, errors='coerce')
+    if numeric_series.empty or pd.isna(numeric_series).all():
+        return pd.Series(["N/A"] * len(numeric_series), index=numeric_series.index)
+    def format_single_second(s, f_type):
+        if pd.isna(s): return "N/A"
+        if f_type == "seconds": return f"{s:.1f}s"
+        elif f_type == "minutes": return f"{(s / 60):.1f}m"
+        elif f_type == "hours": return f"{(s / 3600):.1f}h"
+        elif f_type == "days": return f"{(s / 86400):.1f}d"
+        elif f_type == "mixed":
+            days = int(s // 86400)
+            hours = int((s % 86400) // 3600)
+            minutes = int((s % 3600) // 60)
+            seconds = s % 60
+            parts = []
+            if days > 0: parts.append(f"{days}d")
+            if hours > 0: parts.append(f"{hours}h")
+            if minutes > 0: parts.append(f"{minutes}m")
+            if seconds > 0.1 and (not parts or seconds >= 1): parts.append(f"{seconds:.1f}s")
+            return " ".join(parts) if parts else "0s"
+        return str(s)
+    return numeric_series.apply(lambda x: format_single_second(x, format_type))
+
+def format_stale_days_for_legend(days_value):
+    if pd.isna(days_value): return "N/A"
+    if days_value == 1: return "1 day"
+    return f"{int(days_value)} days"
+
+# --- Define Global Colors for Row Styling ---
+BG_COLOR_GOOD = '#ccffcc' # Light Green (Healthy)
+BG_COLOR_WARNING = '#ffe0b3' # Light Orange (Warning/Partial Failure)
+BG_COLOR_CRITICAL = '#f8d7da' # Light Red (Suspended/Failed)
+BG_COLOR_NONE = '#ffffff' # Explicit white for 'None' option or NaN values
+
+# Helper function for ROW-WISE conditional formatting (unchanged)
+def apply_row_style(row_from_display_df, color_by_option, thresholds, original_df_full_data):
+    current_qualified_name = row_from_display_df.get('Dynamic Table')
+    row_original_data = pd.Series(dtype='object')
+    
+    if isinstance(original_df_full_data, pd.DataFrame) and \
+       'QUALIFIED_NAME' in original_df_full_data.columns and \
+       current_qualified_name in original_df_full_data['QUALIFIED_NAME'].values:
+        row_original_data = original_df_full_data[
+            original_df_full_data['QUALIFIED_NAME'] == current_qualified_name
+        ].iloc[0]
+    
+    style_str = 'background-color: transparent;'
+
+    if row_original_data.empty: 
+        pass 
+    elif color_by_option == 'Status':
+        status = row_original_data.get('SCHEDULING_STATE_STATUS')
+        last_refresh_state = row_original_data.get('LAST_COMPLETED_REFRESH_STATE')
+        if status == 'SUSPENDED': style_str = f'background-color: {BG_COLOR_CRITICAL}'
+        elif last_refresh_state == 'FAILED': style_str = f'background-color: {BG_COLOR_CRITICAL}'
+        elif last_refresh_state in ['UPSTREAM_FAILED', 'CANCELLED', 'WARNING']: style_str = f'background-color: {BG_COLOR_WARNING}'
+        elif status == 'RUNNING' and last_refresh_state == 'SUCCEEDED': style_str = f'background-color: {BG_COLOR_GOOD}'
+        else: style_str = f'background-color: {BG_COLOR_GOOD}'
+    elif color_by_option == 'Lag Ratio':
+        ratio = row_original_data.get('TIME_WITHIN_TARGET_LAG_RATIO')
+        if ratio < thresholds['lag_ratio']['critical']: style_str = f'background-color: {BG_COLOR_CRITICAL}'
+        elif ratio < thresholds['lag_ratio']['warning']: style_str = f'background-color: {BG_COLOR_WARNING}'
+        else: style_str = f'background-color: {BG_COLOR_GOOD}'
+            
+    elif color_by_option == 'Latest Data Time':
+        latest_data_ts = row_original_data.get('LATEST_DATA_TIMESTAMP')
+        if pd.isna(latest_data_ts): style_str = f'background-color: {BG_COLOR_NONE}'
+        else:
+            try:
+                time_diff_days = (datetime.now() - latest_data_ts).total_seconds() / 86400 
+                if time_diff_days >= thresholds['latest_data_time']['critical_days']: style_str = f'background-color: {BG_COLOR_CRITICAL}'
+                elif time_diff_days >= thresholds['latest_data_time']['warning_days']: style_str = f'background-color: {BG_COLOR_WARNING}'
+                else: style_str = f'background-color: {BG_COLOR_GOOD}'
+            except Exception: style_str = f'background-color: {BG_COLOR_NONE}'
+    return pd.Series(style_str, index=row_from_display_df.index, dtype='object')
+
+
+def render_dt_health_tab(metadata_df: pd.DataFrame):
+    st.header("Dynamic Table Health & Current Status")
+    st.write("Analyze the current operational state and aggregate lag metrics of your dynamic tables.")
+
+    if metadata_df.empty:
+        st.info("No metadata available for DT HEALTH tab. Check data source or collection.", icon="ℹ️")
+        return
+
+    # Data Preprocessing (unchanged, ensuring all required columns exist)
     if 'QUALIFIED_NAME' not in metadata_df.columns:
         st.error("Error: 'QUALIFIED_NAME' column missing in metadata_df. Cannot proceed with DT Health tab.", icon="❌")
         return 
@@ -9,8 +104,8 @@
         'SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE', 
         'MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC',
         'LATEST_DATA_TIMESTAMP',
-        'DOMAIN_NAME', # NEW: Add to required columns
-        'SUB_DOMAIN_NAME' # NEW: Add to required columns
+        'DOMAIN_NAME', 
+        'SUB_DOMAIN_NAME' 
     ]
     for col in required_cols_for_lookup:
         if col not in metadata_df.columns:
@@ -19,152 +114,521 @@
                 metadata_df[col] = np.nan
             elif col.endswith('_TIMESTAMP'): 
                  metadata_df[col] = pd.NaT 
-            else: # For new string columns like DOMAIN_NAME, SUB_DOMAIN_NAME
+            else: 
                 metadata_df[col] = 'UNKNOWN'
     
     for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TARGET_LAG_SEC']:
         metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
     
     metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
-
     metadata_df['LATEST_DATA_TIMESTAMP'] = pd.to_datetime(metadata_df['LATEST_DATA_TIMESTAMP'], errors='coerce')
-
-    # Ensure Domain and Subdomain are strings and convert 'nan' to 'UNKNOWN' or appropriate default
     metadata_df['DOMAIN_NAME'] = metadata_df['DOMAIN_NAME'].astype(str).replace('nan', 'UNKNOWN')
     metadata_df['SUB_DOMAIN_NAME'] = metadata_df['SUB_DOMAIN_NAME'].astype(str).replace('nan', 'UNKNOWN')
 
 
-    # --- Keep a copy of the *original* filtered df (before legend filters) for consistency ---
-    base_filtered_df = metadata_df.copy() 
-    
-    # --- Apply Filters from Top Section ---
+    # --- Keep a copy of the *original* df for filter options generation ---
+    # This df will be passed to option generators, not filtered by them.
+    # The actual filtering happens at the end of the filter section.
+    unfiltered_metadata_df_for_options = metadata_df.copy()
+
+    # --- Filters Section using st.expander ---
     st.markdown("---")
-    st.subheader("Apply Filters for DT Health")
+    # Wrap all filters in an expander
+    with st.expander("Apply Filters for DT Health"):
+        # Row 1: Database, Schema, Table, Scheduling State
+        filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
 
-    # Row 1: Database, Schema, Table, Scheduling State
-    filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
+        with filter_cols_dt_health_row1[0]:
+            all_databases_dt_health = ['All'] + sorted(unfiltered_metadata_df_for_options['DATABASE_NAME'].unique().tolist())
+            selected_database_dt_health = st.selectbox(
+                "Database:", options=all_databases_dt_health, key="db_filter_dt_health" # Changed key prefix
+            )
+        with filter_cols_dt_health_row1[1]:
+            # Schema options depend on selected Database
+            temp_df_for_schema_options = unfiltered_metadata_df_for_options.copy()
+            if selected_database_dt_health != 'All':
+                temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
 
-    with filter_cols_dt_health_row1[0]:
-        all_databases_dt_health = ['All'] + sorted(base_filtered_df['DATABASE_NAME'].unique().tolist())
-        selected_database_dt_health = st.selectbox(
-            "Database:", options=all_databases_dt_health, key="new_db_filter_dt_health"
-        )
-    with filter_cols_dt_health_row1[1]:
-        temp_df_for_schema_options = base_filtered_df.copy()
-        if selected_database_dt_health != 'All':
-            temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+            if not temp_df_for_schema_options.empty:
+                schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
+            else:
+                schemas_in_db_dt_health = ['All']
+                st.info("No schemas found for selected Database.", icon="ℹ️")
 
-        if not temp_df_for_schema_options.empty:
-            schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
-        else:
-            schemas_in_db_dt_health = ['All']
-            st.info("No schemas found for selected Database.", icon="ℹ️")
-
-        selected_schema_dt_health = st.selectbox(
-            "Schema:", options=schemas_in_db_dt_health, key="new_schema_filter_dt_health"
-        )
-    
-    df_for_table_options = base_filtered_df.copy()
-    if selected_database_dt_health != 'All':
-        df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy()
-    if selected_schema_dt_health != 'All':
-        df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
-
-
-    with filter_cols_dt_health_row1[2]:
-        if not df_for_table_options.empty:
-            all_tables_dt_health_options = ['All'] + sorted(df_for_table_options['TABLE_NAME'].unique().tolist())
-            default_tables_dt_health_selected = ['All']
-        else:
-            all_tables_dt_health_options = ['All']
-            default_tables_dt_health_selected = ['All']
-            st.info("No tables found for selected DB/Schema.", icon="ℹ️")
-        selected_table_dt_health = st.multiselect(
-            "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="new_table_filter_dt_health"
-        )
-    with filter_cols_dt_health_row1[3]:
-        all_scheduling_states = ['All'] + sorted(base_filtered_df['SCHEDULING_STATE_STATUS'].unique().tolist())
-        selected_scheduling_state = st.multiselect(
-            "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="new_scheduling_state_filter_dt_health"
-        )
-    
-    # NEW ROW 2: Domain Name, Sub Domain Name
-    filter_cols_dt_health_row2_domain = st.columns([1, 1, 2]) # 1: Domain, 1: Sub Domain, 2: Spacer
-
-    with filter_cols_dt_health_row2_domain[0]:
-        # Options for Domain Name should be based on base_filtered_df (after DB/Schema/Table filters)
-        temp_df_for_domain_options = base_filtered_df.copy()
-        if selected_database_dt_health != 'All':
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+            selected_schema_dt_health = st.selectbox(
+                "Schema:", options=schemas_in_db_dt_health, key="schema_filter_dt_health"
+            )
+        
+        # Table options depend on selected DB/Schema
+        df_for_table_options = temp_df_for_schema_options.copy() # Continues from schema filtered df
         if selected_schema_dt_health != 'All':
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
-        if selected_table_dt_health and 'All' not in selected_table_dt_health:
-            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['TABLE_NAME'].isin(selected_table_dt_health)].copy()
+            df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
 
-        if not temp_df_for_domain_options.empty:
-            all_domain_names = ['All'] + sorted(temp_df_for_domain_options['DOMAIN_NAME'].unique().tolist())
-        else:
-            all_domain_names = ['All']
-            st.info("No Domain Names found for current selections.", icon="ℹ️")
-        selected_domain_name = st.selectbox(
-            "Domain Name:", options=all_domain_names, key="new_domain_filter_dt_health"
-        )
+        with filter_cols_dt_health_row1[2]:
+            if not df_for_table_options.empty:
+                all_tables_dt_health_options = ['All'] + sorted(df_for_table_options['TABLE_NAME'].unique().tolist())
+                default_tables_dt_health_selected = ['All']
+            else:
+                all_tables_dt_health_options = ['All']
+                default_tables_dt_health_selected = ['All']
+                st.info("No tables found for selected DB/Schema.", icon="ℹ️")
+            selected_table_dt_health = st.multiselect(
+                "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="table_filter_dt_health"
+            )
+        
+        with filter_cols_dt_health_row1[3]:
+            # Scheduling state options based on all data
+            all_scheduling_states = ['All'] + sorted(unfiltered_metadata_df_for_options['SCHEDULING_STATE_STATUS'].unique().tolist())
+            selected_scheduling_state = st.multiselect(
+                "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="scheduling_state_filter_dt_health"
+            )
+        
+        # Row 2: Domain Name, Sub Domain Name, Target Lag (seconds), Display Lag Times
+        # This mirrors the image's filter layout
+        filter_cols_dt_health_row2 = st.columns([1, 1, 1, 1])
 
-    with filter_cols_dt_health_row2_domain[1]:
-        # Options for Sub Domain Name should be based on previous filters including Domain Name
-        temp_df_for_subdomain_options = temp_df_for_domain_options.copy() # Starts from df filtered by DB/Schema/Table
-        if selected_domain_name != 'All':
-            temp_df_for_subdomain_options = temp_df_for_subdomain_options[temp_df_for_subdomain_options['DOMAIN_NAME'] == selected_domain_name].copy()
+        with filter_cols_dt_health_row2[0]:
+            # Options for Domain Name should be based on existing filters to narrow down selection
+            temp_df_for_domain_options = df_for_table_options.copy() # Starts from df filtered by DB/Schema/Table
 
-        if not temp_df_for_subdomain_options.empty:
-            all_sub_domain_names = ['All'] + sorted(temp_df_for_subdomain_options['SUB_DOMAIN_NAME'].unique().tolist())
-        else:
-            all_sub_domain_names = ['All']
-            st.info("No Sub Domain Names found for current selections.", icon="ℹ️")
-        selected_sub_domain_name = st.selectbox(
-            "Sub Domain Name:", options=all_sub_domain_names, key="new_subdomain_filter_dt_health"
-        )
+            if not temp_df_for_domain_options.empty:
+                all_domain_names = ['All'] + sorted(temp_df_for_domain_options['DOMAIN_NAME'].unique().tolist())
+            else:
+                all_domain_names = ['All']
+                st.info("No Domain Names found for current selections.", icon="ℹ️")
+            selected_domain_name = st.selectbox(
+                "Domain Name:", options=all_domain_names, key="domain_filter_dt_health"
+            )
 
-    # Original Row 2 (now Row 3 conceptually): Time Format
-    filter_cols_dt_health_row3_time_format = st.columns([1])
-    with filter_cols_dt_health_row3_time_format[0]:
-        time_format_option = st.radio(
-            "Display Lag Times In:", 
-            options=["mixed", "seconds", "minutes", "hours", "days"], 
-            index=0,
-            horizontal=True,
-            key="new_time_format_dt_health"
-        )
+        with filter_cols_dt_health_row2[1]:
+            # Options for Sub Domain Name should be based on previous filters including Domain Name
+            temp_df_for_subdomain_options = temp_df_for_domain_options.copy()
+            if selected_domain_name != 'All':
+                temp_df_for_subdomain_options = temp_df_for_subdomain_options[temp_df_for_subdomain_options['DOMAIN_NAME'] == selected_domain_name].copy()
+
+            if not temp_df_for_subdomain_options.empty:
+                all_sub_domain_names = ['All'] + sorted(temp_df_for_subdomain_options['SUB_DOMAIN_NAME'].unique().tolist())
+            else:
+                all_sub_domain_names = ['All']
+                st.info("No Sub Domain Names found for current selections.", icon="ℹ️")
+            selected_sub_domain_name = st.selectbox(
+                "Sub Domain Name:", options=all_sub_domain_names, key="subdomain_filter_dt_health"
+            )
+        
+        with filter_cols_dt_health_row2[2]:
+            # Target Lag (seconds) filter - Multiselect
+            # Options for Target Lag should be based on existing filters
+            temp_df_for_target_lag_options = temp_df_for_subdomain_options.copy() # Continues from current filtered state
+
+            if not temp_df_for_target_lag_options.empty:
+                # Get unique, non-NaN target lags, sort them, and format
+                unique_target_lags_seconds = sorted(temp_df_for_target_lag_options['TARGET_LAG_SEC'].dropna().unique().tolist())
+                # Format for display in multiselect (e.g., 60s, 300s, 3600s, etc.)
+                all_target_lags_display_options = ['All'] + [
+                    format_seconds_to_readable(s, 'mixed').iloc[0] for s in unique_target_lags_seconds
+                ]
+                # Store a mapping for filtering back to numeric seconds
+                target_lag_display_to_value = {
+                    format_seconds_to_readable(s, 'mixed').iloc[0]: s for s in unique_target_lags_seconds
+                }
+                
+                default_target_lags_selected = ['All']
+            else:
+                all_target_lags_display_options = ['All']
+                default_target_lags_selected = ['All']
+                st.info("No Target Lag options found for current selections.", icon="ℹ️")
+
+            selected_target_lag_display = st.multiselect(
+                "Target Lag (seconds):", 
+                options=all_target_lags_display_options, 
+                default=default_target_lags_selected, 
+                key="target_lag_filter_dt_health"
+            )
+            # Convert selected display values back to numeric seconds for filtering
+            selected_target_lags_numeric = [
+                target_lag_display_to_value[s] for s in selected_target_lag_display if s != 'All'
+            ]
+
+        with filter_cols_dt_health_row2[3]:
+            time_format_option = st.radio(
+                "Display Lag Times In:", 
+                options=["mixed", "seconds", "minutes", "hours", "days"], 
+                index=0,
+                horizontal=True,
+                key="time_format_dt_health" # Changed key prefix
+            )
     
-    st.markdown("---")
+    st.markdown("---") # Separator after the expander
 
-    # --- Apply All Top-Level Filters to Main DataFrame (re-filter based on user selections) ---
+    # --- Apply All Top-Level Filters (including new Target Lag filter) ---
     # Start with a fresh copy of the full metadata_df for filtering based on *all* selections
     final_filtered_metadata_df = metadata_df.copy()
 
+    # Apply Database, Schema, Table filters
     if selected_database_dt_health != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
     if selected_schema_dt_health != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
     if selected_table_dt_health and 'All' not in selected_table_dt_health:
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
-    elif not selected_table_dt_health:
-        st.warning("No table(s) selected. Display will be empty.", icon="⚠️")
+    elif not selected_table_dt_health: # If list is empty (no tables selected)
         final_filtered_metadata_df = pd.DataFrame()
 
+    # Apply Scheduling State filter
     if selected_scheduling_state and 'All' not in selected_scheduling_state:
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
-    elif not selected_scheduling_state:
-        st.warning("No scheduling state(s) selected. Display will be empty.", icon="⚠️")
+    elif not selected_scheduling_state: # If list is empty (no states selected)
         final_filtered_metadata_df = pd.DataFrame()
 
-    # NEW: Apply Domain and Sub Domain filters
+    # Apply Domain and Sub Domain filters
     if selected_domain_name != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DOMAIN_NAME'] == selected_domain_name].copy()
     if selected_sub_domain_name != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SUB_DOMAIN_NAME'] == selected_sub_domain_name].copy()
 
-
+    # NEW: Apply Target Lag filter
+    if selected_target_lags_numeric: # If not empty (i.e., 'All' is not the only selection)
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TARGET_LAG_SEC'].isin(selected_target_lags_numeric)].copy()
+    
     if final_filtered_metadata_df.empty:
         st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
         return
+
+    # --- Rest of the code for table display, styling, and sorting (mostly unchanged) ---
+
+    # Custom CSS for a minimal color box helper
+    st.markdown("""
+        <style>
+        .color-box-flex {
+            width: 15px;
+            height: 15px;
+            border-radius: 3px;
+            display: inline-block; 
+            margin-right: 5px; 
+            border: 1px solid #ccc;
+            flex-shrink: 0; 
+        }
+        .stCheckbox > label {
+            font-size: 14px;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+    col1, col2 = st.columns([0.4, 0.6]) 
+
+    with col1:
+        st.subheader("Detailed Dynamic Table Status") 
+    
+    with col2:
+        color_by_option = st.radio(
+            "Color Table By:",
+            ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
+            index=0,
+            horizontal=True, 
+            key="color_by_dt_health_table" # Changed key prefix
+        )
+    
+    severity_label_col, legend_items_col = st.columns([0.15, 0.85]) 
+    selected_legend_filters = [] 
+
+    with severity_label_col:
+        st.markdown("<span style='font-weight: bold; font-size: 16px; white-space: nowrap;'>Severity:</span>", unsafe_allow_html=True)
+    
+    with legend_items_col:
+        thresholds_for_styling = { 
+            'mean_lag': {'ok': 300, 'warning': 1800, 'critical': 3600},
+            'max_lag': {'ok': 600, 'warning': 3600, 'critical': 7200},
+            'time_above': {'ok': 0, 'warning': 300, 'critical': 1800},
+            'lag_ratio': {'ok': 0.90, 'warning': 0.70, 'critical': 0.01}, 
+            'latest_data_time': {
+                'critical_days': 3,  
+                'warning_days': 1    
+            }
+        }
+        legend_thresholds = thresholds_for_styling 
+
+        if color_by_option != 'None':
+            with st.container():
+                legend_checkbox_cols = st.columns(3) 
+
+                if color_by_option == 'Status':
+                    with legend_checkbox_cols[0]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>Suspended / Failed",
+                            key="legend_filter_status_critical",
+                            help="Filter for Suspended or Failed refreshes",
+                            value=False,
+                            unsafe_allow_html=True 
+                        ): selected_legend_filters.append('status_critical')
+
+                    with legend_checkbox_cols[1]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>Warning / Partial Failure",
+                            key="legend_filter_status_warning",
+                            help="Filter for Warning, Cancelled, or Upstream Failed refreshes",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('status_warning')
+
+                    with legend_checkbox_cols[2]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Running (Succeeded)",
+                            key="legend_filter_status_good",
+                            help="Filter for Running and Succeeded refreshes",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('status_good')
+                        
+                elif color_by_option == 'Lag Ratio':
+                    threshold_set = legend_thresholds['lag_ratio'] 
+                    critical_val_fmt = f"{round(threshold_set['critical'] * 100, 1)}%"
+                    warning_val_fmt = f"{round(threshold_set['warning'] * 100, 1)}%"
+                    ok_val_fmt = f"{round(threshold_set['ok'] * 100, 1)}%"
+
+                    with legend_checkbox_cols[0]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>Critical (< {critical_val_fmt})",
+                            key="legend_filter_lag_critical",
+                            help="Filter for Lag Ratio below Critical threshold",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('lag_critical')
+
+                    with legend_checkbox_cols[1]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>Warning (< {warning_val_fmt})",
+                            key="legend_filter_lag_warning",
+                            help="Filter for Lag Ratio below Warning threshold",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('lag_warning')
+
+                    with legend_checkbox_cols[2]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Good (>= {ok_val_fmt})",
+                            key="legend_filter_lag_good",
+                            help="Filter for Lag Ratio at or above Good threshold",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('lag_good')
+
+                elif color_by_option == 'Latest Data Time':
+                    critical_val_days = legend_thresholds['latest_data_time']['critical_days']
+                    warning_val_days = legend_thresholds['latest_data_time']['warning_days']
+                    
+                    critical_text = format_stale_days_for_legend(critical_val_days)
+                    warning_text = format_stale_days_for_legend(warning_val_days)
+
+                    with legend_checkbox_cols[0]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_CRITICAL};'></span>{critical_text} or older",
+                            key="legend_filter_data_critical",
+                            help="Filter for data older than critical threshold",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('data_critical')
+
+                    with legend_checkbox_cols[1]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_WARNING};'></span>{warning_text} to < {critical_val_days} days old",
+                            key="legend_filter_data_warning",
+                            help="Filter for data between warning and critical thresholds",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('data_warning')
+
+                    with legend_checkbox_cols[2]:
+                        if st.checkbox(
+                            f"<span class='color-box-flex' style='background-color: {BG_COLOR_GOOD};'></span>Less than {warning_text} old",
+                            key="legend_filter_data_good",
+                            help="Filter for data newer than warning threshold",
+                            value=False,
+                            unsafe_allow_html=True
+                        ): selected_legend_filters.append('data_good')
+            
+    st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
+
+    # --- Apply Legend Filters to final_filtered_metadata_df ---
+    if selected_legend_filters:
+        temp_filtered_df = pd.DataFrame() 
+        
+        if 'status_critical' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'SUSPENDED') |
+                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'] == 'FAILED')
+            ]])
+        if 'status_warning' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'].isin(['UPSTREAM_FAILED', 'CANCELLED', 'WARNING'])) &
+                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] != 'SUSPENDED')
+            ]])
+        if 'status_good' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (final_filtered_metadata_df['SCHEDULING_STATE_STATUS'] == 'RUNNING') & 
+                (final_filtered_metadata_df['LAST_COMPLETED_REFRESH_STATE'] == 'SUCCEEDED')
+            ]])
+        
+        if 'lag_critical' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['critical']
+            ]])
+        if 'lag_warning' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['critical']) &
+                (final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] < thresholds_for_styling['lag_ratio']['warning'])
+            ]])
+        if 'lag_good' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                final_filtered_metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] >= thresholds_for_styling['lag_ratio']['ok']
+            ]])
+
+        now = datetime.now()
+        if 'data_critical' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                ((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) >= thresholds_for_styling['latest_data_time']['critical_days']
+            ]])
+        if 'data_warning' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) >= thresholds_for_styling['latest_data_time']['warning_days']) &
+                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) < thresholds_for_styling['latest_data_time']['critical_days'])
+            ]])
+        if 'data_good' in selected_legend_filters:
+            temp_filtered_df = pd.concat([temp_filtered_df, final_filtered_metadata_df[
+                (((now - final_filtered_metadata_df['LATEST_DATA_TIMESTAMP']).dt.total_seconds() / 86400).fillna(9999) < thresholds_for_styling['latest_data_time']['warning_days'])
+            ]])
+        
+        final_filtered_metadata_df = temp_filtered_df.drop_duplicates(subset=['QUALIFIED_NAME']).copy()
+    
+    if final_filtered_metadata_df.empty:
+        st.info("No detailed dynamic table status to display based on current filters and legend selections.", icon="ℹ️")
+        return
+
+    df_for_display = final_filtered_metadata_df.copy()
+    
+    df_for_display['TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TARGET_LAG_SEC'], time_format_option)
+    df_for_display['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MEAN_LAG_SEC'], time_format_option)
+    df_for_display['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['MAXIMUM_LAG_SEC'], time_format_option)
+    df_for_display['TIME_ABOVE_TARGET_LAG_SEC_FMT'] = format_seconds_to_readable(df_for_display['TIME_ABOVE_TARGET_LAG_SEC'], time_format_option)
+    df_for_display['TIME_WITHIN_TARGET_LAG_RATIO_FMT'] = df_for_display['TIME_WITHIN_TARGET_LAG_RATIO'].apply(lambda x: f"{round(x * 100, 1)}%") 
+
+
+    dt_health_display_columns_order = [
+        'QUALIFIED_NAME',
+        'DATABASE_NAME', 
+        'SCHEMA_NAME', 
+        'DOMAIN_NAME', 
+        'SUB_DOMAIN_NAME', 
+        'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
+        'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
+        'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
+        'LATEST_DATA_TIMESTAMP', 
+        'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
+        'COLLECTION_TIMESTAMP'
+    ]
+    
+    dt_health_display_labels = {
+        'QUALIFIED_NAME': 'Dynamic Table',
+        'DATABASE_NAME': 'Database',
+        'SCHEMA_NAME': 'Schema',
+        'DOMAIN_NAME': 'Domain', 
+        'SUB_DOMAIN_NAME': 'Sub Domain', 
+        'SCHEDULING_STATE_STATUS': 'Status',
+        'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
+        'TARGET_LAG_SEC_FMT': 'Target Lag',
+        'MEAN_LAG_SEC_FMT': 'Mean Lag',
+        'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
+        'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
+        'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', 
+        'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
+        'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
+        'COLLECTION_TIMESTAMP': 'Snapshot Time'
+    }
+
+    df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
+
+
+    status_and_refresh_severity_sort_order = {
+        ('SUSPENDED', 'FAILED'): 0, ('SUSPENDED', 'UPSTREAM_FAILED'): 1,
+        ('SUSPENDED', 'CANCELLED'): 2, ('SUSPENDED', 'WARNING'): 3,
+        ('SUSPENDED', 'SUCCEEDED'): 4, ('SUSPENDED', 'UNKNOWN'): 5,
+        ('RUNNING', 'FAILED'): 6, 
+        ('RUNNING', 'UPSTREAM_FAILED'): 7, ('RUNNING', 'CANCELLED'): 8,
+        ('RUNNING', 'WARNING'): 9,
+        ('RUNNING', 'SUCCEEDED'): 10,
+        ('UNKNOWN', 'UNKNOWN'): 11, (None, None): 12 
+    }
+
+    final_filtered_metadata_df['COMPOUND_STATUS_SORT_KEY'] = final_filtered_metadata_df.apply(
+        lambda row: status_and_refresh_severity_sort_order.get(
+            (row.get('SCHEDULING_STATE_STATUS'), row.get('LAST_COMPLETED_REFRESH_STATE')),
+            status_and_refresh_severity_sort_order[(None, None)]
+        ), axis=1
+    )
+
+    def get_lag_ratio_sort_key(row, thresholds):
+        ratio = row.get('TIME_WITHIN_TARGET_LAG_RATIO')
+        if pd.isna(ratio): return 99 
+        if ratio < thresholds['lag_ratio']['critical']: return 0 
+        if ratio < thresholds['lag_ratio']['warning']: return 1 
+        return 2 
+
+    def get_latest_data_time_sort_key(row, thresholds):
+        latest_data_ts = row.get('LATEST_DATA_TIMESTAMP')
+        time_diff_seconds = (datetime.now() - latest_data_ts).total_seconds() if pd.notna(latest_data_ts) else 9999 * 86400
+        time_diff_days = time_diff_seconds / 86400
+
+        if time_diff_days >= thresholds['latest_data_time']['critical_days']: return 0 
+        if time_diff_days >= thresholds['latest_data_time']['warning_days']: return 1 
+        return 2 
+
+    if color_by_option == 'Lag Ratio':
+        final_filtered_metadata_df['LAG_RATIO_SORT_KEY'] = final_filtered_metadata_df.apply(
+            lambda row: get_lag_ratio_sort_key(row, thresholds_for_styling), axis=1
+        )
+    elif color_by_option == 'Latest Data Time':
+        final_filtered_metadata_df['LATEST_DATA_TIME_SORT_KEY'] = final_filtered_metadata_df.apply(
+            lambda row: get_latest_data_time_sort_key(row, thresholds_for_styling), axis=1
+        )
+
+
+    sort_columns = []
+    ascending_flags = []
+
+    if color_by_option == 'None' or color_by_option == 'Status':
+        sort_columns = ['COMPOUND_STATUS_SORT_KEY']
+        ascending_flags = [True] 
+    elif color_by_option == 'Lag Ratio':
+        sort_columns = ['LAG_RATIO_SORT_KEY', 'TIME_WITHIN_TARGET_LAG_RATIO'] 
+        ascending_flags = [True, True] 
+    elif color_by_option == 'Latest Data Time':
+        sort_columns = ['LATEST_DATA_TIME_SORT_KEY', 'LATEST_DATA_TIMESTAMP'] 
+        ascending_flags = [True, False] 
+
+    if sort_columns:
+        sort_order_indices = final_filtered_metadata_df.sort_values(
+            by=sort_columns, ascending=ascending_flags, na_position='last'
+        ).index
+        final_df_for_display_sorted = df_for_display.loc[sort_order_indices].reset_index(drop=True)
+    else:
+        final_df_for_display_sorted = df_for_display.copy()
+        
+    if color_by_option != 'None':
+        styled_df = final_df_for_display_sorted.style.apply(
+            lambda row_display: apply_row_style(
+                row_display,             
+                color_by_option,         
+                thresholds_for_styling,  
+                final_filtered_metadata_df 
+            ), 
+            axis=1 
+        )
+        st.dataframe(
+            styled_df,
+            use_container_width=True
+        )
+    else: 
+        st.dataframe(
+            final_df_for_display_sorted, 
+            use_container_width=True
+        )
