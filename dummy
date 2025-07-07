@@ -127,70 +127,68 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     # --- Keep a copy of the *original* df for filter options generation ---
-    # This df will be passed to option generators, not filtered by them.
-    # The actual filtering happens at the end of the filter section.
     unfiltered_metadata_df_for_options = metadata_df.copy()
 
-    # --- Filters Section using st.expander ---
-    st.markdown("---")
-    # Wrap all filters in an expander
-    with st.expander("Apply Filters for DT Health"):
-        # Row 1: Database, Schema, Table, Scheduling State
-        filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
+    st.markdown("---") # Separator before the essential filters
 
-        with filter_cols_dt_health_row1[0]:
-            all_databases_dt_health = ['All'] + sorted(unfiltered_metadata_df_for_options['DATABASE_NAME'].unique().tolist())
-            selected_database_dt_health = st.selectbox(
-                "Database:", options=all_databases_dt_health, key="db_filter_dt_health" # Changed key prefix
-            )
-        with filter_cols_dt_health_row1[1]:
-            # Schema options depend on selected Database
-            temp_df_for_schema_options = unfiltered_metadata_df_for_options.copy()
-            if selected_database_dt_health != 'All':
-                temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+    st.subheader("Apply Filters for DT Health") # Keep this subheader as it covers all filters below
 
-            if not temp_df_for_schema_options.empty:
-                schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
-            else:
-                schemas_in_db_dt_health = ['All']
-                st.info("No schemas found for selected Database.", icon="ℹ️")
+    # ===============================================
+    # Hybrid Filter Section Start
+    # ===============================================
 
-            selected_schema_dt_health = st.selectbox(
-                "Schema:", options=schemas_in_db_dt_health, key="schema_filter_dt_health"
-            )
-        
-        # Table options depend on selected DB/Schema
-        df_for_table_options = temp_df_for_schema_options.copy() # Continues from schema filtered df
-        if selected_schema_dt_health != 'All':
-            df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+    # Essential Filters (Always Visible)
+    # Row for Database, Schema, Table, Scheduling State
+    filter_cols_essential = st.columns([1, 1, 1, 1])
 
-        with filter_cols_dt_health_row1[2]:
-            if not df_for_table_options.empty:
-                all_tables_dt_health_options = ['All'] + sorted(df_for_table_options['TABLE_NAME'].unique().tolist())
-                default_tables_dt_health_selected = ['All']
-            else:
-                all_tables_dt_health_options = ['All']
-                default_tables_dt_health_selected = ['All']
-                st.info("No tables found for selected DB/Schema.", icon="ℹ️")
-            selected_table_dt_health = st.multiselect(
-                "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="table_filter_dt_health"
-            )
-        
-        with filter_cols_dt_health_row1[3]:
-            # Scheduling state options based on all data
-            all_scheduling_states = ['All'] + sorted(unfiltered_metadata_df_for_options['SCHEDULING_STATE_STATUS'].unique().tolist())
-            selected_scheduling_state = st.multiselect(
-                "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="scheduling_state_filter_dt_health"
-            )
-        
-        # Row 2: Domain Name, Sub Domain Name, Target Lag (seconds), Display Lag Times
-        # This mirrors the image's filter layout
-        filter_cols_dt_health_row2 = st.columns([1, 1, 1, 1])
+    with filter_cols_essential[0]:
+        all_databases_dt_health = ['All'] + sorted(unfiltered_metadata_df_for_options['DATABASE_NAME'].unique().tolist())
+        selected_database_dt_health = st.selectbox(
+            "Database:", options=all_databases_dt_health, key="db_filter_dt_health"
+        )
+    with filter_cols_essential[1]:
+        temp_df_for_schema_options = unfiltered_metadata_df_for_options.copy()
+        if selected_database_dt_health != 'All':
+            temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
 
-        with filter_cols_dt_health_row2[0]:
-            # Options for Domain Name should be based on existing filters to narrow down selection
-            temp_df_for_domain_options = df_for_table_options.copy() # Starts from df filtered by DB/Schema/Table
+        if not temp_df_for_schema_options.empty:
+            schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
+        else:
+            schemas_in_db_dt_health = ['All']
+            st.info("No schemas found for selected Database.", icon="ℹ️")
 
+        selected_schema_dt_health = st.selectbox(
+            "Schema:", options=schemas_in_db_dt_health, key="schema_filter_dt_health"
+        )
+    
+    df_for_table_options = temp_df_for_schema_options.copy() 
+    if selected_schema_dt_health != 'All':
+        df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+
+    with filter_cols_essential[2]:
+        if not df_for_table_options.empty:
+            all_tables_dt_health_options = ['All'] + sorted(df_for_table_options['TABLE_NAME'].unique().tolist())
+            default_tables_dt_health_selected = ['All']
+        else:
+            all_tables_dt_health_options = ['All']
+            default_tables_dt_health_selected = ['All']
+            st.info("No tables found for selected DB/Schema.", icon="ℹ️")
+        selected_table_dt_health = st.multiselect(
+            "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="table_filter_dt_health"
+        )
+    
+    with filter_cols_essential[3]:
+        all_scheduling_states = ['All'] + sorted(unfiltered_metadata_df_for_options['SCHEDULING_STATE_STATUS'].unique().tolist())
+        selected_scheduling_state = st.multiselect(
+            "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="scheduling_state_filter_dt_health"
+        )
+    
+    # Advanced Filters (within an expander)
+    with st.expander("More Filters (Domain, Sub Domain, Target Lag)"):
+        filter_cols_advanced = st.columns([1, 1, 1]) # 3 columns for 3 advanced filters
+
+        with filter_cols_advanced[0]:
+            temp_df_for_domain_options = df_for_table_options.copy() # Starts from df filtered by essential filters
             if not temp_df_for_domain_options.empty:
                 all_domain_names = ['All'] + sorted(temp_df_for_domain_options['DOMAIN_NAME'].unique().tolist())
             else:
@@ -200,8 +198,7 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 "Domain Name:", options=all_domain_names, key="domain_filter_dt_health"
             )
 
-        with filter_cols_dt_health_row2[1]:
-            # Options for Sub Domain Name should be based on previous filters including Domain Name
+        with filter_cols_advanced[1]:
             temp_df_for_subdomain_options = temp_df_for_domain_options.copy()
             if selected_domain_name != 'All':
                 temp_df_for_subdomain_options = temp_df_for_subdomain_options[temp_df_for_subdomain_options['DOMAIN_NAME'] == selected_domain_name].copy()
@@ -215,23 +212,17 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 "Sub Domain Name:", options=all_sub_domain_names, key="subdomain_filter_dt_health"
             )
         
-        with filter_cols_dt_health_row2[2]:
-            # Target Lag (seconds) filter - Multiselect
-            # Options for Target Lag should be based on existing filters
+        with filter_cols_advanced[2]:
             temp_df_for_target_lag_options = temp_df_for_subdomain_options.copy() # Continues from current filtered state
 
             if not temp_df_for_target_lag_options.empty:
-                # Get unique, non-NaN target lags, sort them, and format
                 unique_target_lags_seconds = sorted(temp_df_for_target_lag_options['TARGET_LAG_SEC'].dropna().unique().tolist())
-                # Format for display in multiselect (e.g., 60s, 300s, 3600s, etc.)
                 all_target_lags_display_options = ['All'] + [
                     format_seconds_to_readable(s, 'mixed').iloc[0] for s in unique_target_lags_seconds
                 ]
-                # Store a mapping for filtering back to numeric seconds
                 target_lag_display_to_value = {
                     format_seconds_to_readable(s, 'mixed').iloc[0]: s for s in unique_target_lags_seconds
                 }
-                
                 default_target_lags_selected = ['All']
             else:
                 all_target_lags_display_options = ['All']
@@ -244,23 +235,17 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
                 default=default_target_lags_selected, 
                 key="target_lag_filter_dt_health"
             )
-            # Convert selected display values back to numeric seconds for filtering
             selected_target_lags_numeric = [
                 target_lag_display_to_value[s] for s in selected_target_lag_display if s != 'All'
             ]
-
-        with filter_cols_dt_health_row2[3]:
-            time_format_option = st.radio(
-                "Display Lag Times In:", 
-                options=["mixed", "seconds", "minutes", "hours", "days"], 
-                index=0,
-                horizontal=True,
-                key="time_format_dt_health" # Changed key prefix
-            )
     
-    st.markdown("---") # Separator after the expander
+    st.markdown("---") # Separator after the filter section
 
-    # --- Apply All Top-Level Filters (including new Target Lag filter) ---
+    # ===============================================
+    # Hybrid Filter Section End
+    # ===============================================
+
+    # --- Apply All Top-Level Filters ---
     # Start with a fresh copy of the full metadata_df for filtering based on *all* selections
     final_filtered_metadata_df = metadata_df.copy()
 
@@ -271,13 +256,13 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
     if selected_table_dt_health and 'All' not in selected_table_dt_health:
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
-    elif not selected_table_dt_health: # If list is empty (no tables selected)
+    elif not selected_table_dt_health:
         final_filtered_metadata_df = pd.DataFrame()
 
     # Apply Scheduling State filter
     if selected_scheduling_state and 'All' not in selected_scheduling_state:
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
-    elif not selected_scheduling_state: # If list is empty (no states selected)
+    elif not selected_scheduling_state:
         final_filtered_metadata_df = pd.DataFrame()
 
     # Apply Domain and Sub Domain filters
@@ -286,17 +271,16 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
     if selected_sub_domain_name != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SUB_DOMAIN_NAME'] == selected_sub_domain_name].copy()
 
-    # NEW: Apply Target Lag filter
-    if selected_target_lags_numeric: # If not empty (i.e., 'All' is not the only selection)
+    # Apply Target Lag filter
+    if selected_target_lags_numeric:
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TARGET_LAG_SEC'].isin(selected_target_lags_numeric)].copy()
     
     if final_filtered_metadata_df.empty:
         st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
         return
 
-    # --- Rest of the code for table display, styling, and sorting (mostly unchanged) ---
-
-    # Custom CSS for a minimal color box helper
+    # --- Detailed Dynamic Table Current Status Table Section & Display Options ---
+    
     st.markdown("""
         <style>
         .color-box-flex {
@@ -314,20 +298,33 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         </style>
         """, unsafe_allow_html=True)
 
-    col1, col2 = st.columns([0.4, 0.6]) 
+    # Place "Detailed Dynamic Table Status" header and Display/Color By options side-by-side
+    header_and_display_options_cols = st.columns([0.4, 0.6])
 
-    with col1:
+    with header_and_display_options_cols[0]:
         st.subheader("Detailed Dynamic Table Status") 
     
-    with col2:
-        color_by_option = st.radio(
-            "Color Table By:",
-            ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
-            index=0,
-            horizontal=True, 
-            key="color_by_dt_health_table" # Changed key prefix
-        )
-    
+    with header_and_display_options_cols[1]:
+        # Nested columns for the two radio buttons to put them on the same line if possible
+        radio_cols = st.columns(2)
+        with radio_cols[0]:
+            color_by_option = st.radio(
+                "Color Table By:",
+                ('None', 'Status', 'Lag Ratio', 'Latest Data Time'),
+                index=0,
+                horizontal=True, 
+                key="color_by_dt_health_table"
+            )
+        with radio_cols[1]:
+            time_format_option = st.radio( # Moved this here
+                "Display Lag Times In:", 
+                options=["mixed", "seconds", "minutes", "hours", "days"], 
+                index=0,
+                horizontal=True,
+                key="time_format_dt_health" 
+            )
+
+    # Severity label and legend remain below, aligned to the table
     severity_label_col, legend_items_col = st.columns([0.15, 0.85]) 
     selected_legend_filters = [] 
 
@@ -448,7 +445,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
             
     st.write("Detailed metadata and lag metrics for each dynamic table based on latest snapshot.")
 
-    # --- Apply Legend Filters to final_filtered_metadata_df ---
     if selected_legend_filters:
         temp_filtered_df = pd.DataFrame() 
         
@@ -513,36 +509,22 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
 
 
     dt_health_display_columns_order = [
-        'QUALIFIED_NAME',
-        'DATABASE_NAME', 
-        'SCHEMA_NAME', 
-        'DOMAIN_NAME', 
-        'SUB_DOMAIN_NAME', 
-        'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
+        'QUALIFIED_NAME', 'DATABASE_NAME', 'SCHEMA_NAME', 'DOMAIN_NAME', 
+        'SUB_DOMAIN_NAME', 'SCHEDULING_STATE_STATUS', 'SCHEDULING_STATE_REASON_MESSAGE', 
         'TARGET_LAG_SEC_FMT', 'MEAN_LAG_SEC_FMT', 'MAXIMUM_LAG_SEC_FMT',
         'TIME_ABOVE_TARGET_LAG_SEC_FMT', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT', 
-        'LATEST_DATA_TIMESTAMP', 
-        'LAST_COMPLETED_REFRESH_STATE', 'EXECUTING_REFRESH_QUERY_ID',
-        'COLLECTION_TIMESTAMP'
+        'LATEST_DATA_TIMESTAMP', 'LAST_COMPLETED_REFRESH_STATE', 
+        'EXECUTING_REFRESH_QUERY_ID', 'COLLECTION_TIMESTAMP'
     ]
     
     dt_health_display_labels = {
-        'QUALIFIED_NAME': 'Dynamic Table',
-        'DATABASE_NAME': 'Database',
-        'SCHEMA_NAME': 'Schema',
-        'DOMAIN_NAME': 'Domain', 
-        'SUB_DOMAIN_NAME': 'Sub Domain', 
-        'SCHEDULING_STATE_STATUS': 'Status',
-        'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
-        'TARGET_LAG_SEC_FMT': 'Target Lag',
-        'MEAN_LAG_SEC_FMT': 'Mean Lag',
-        'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
-        'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag',
-        'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
-        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', 
-        'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
-        'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID',
-        'COLLECTION_TIMESTAMP': 'Snapshot Time'
+        'QUALIFIED_NAME': 'Dynamic Table', 'DATABASE_NAME': 'Database', 'SCHEMA_NAME': 'Schema',
+        'DOMAIN_NAME': 'Domain', 'SUB_DOMAIN_NAME': 'Sub Domain', 
+        'SCHEDULING_STATE_STATUS': 'Status', 'SCHEDULING_STATE_REASON_MESSAGE': 'Reason',
+        'TARGET_LAG_SEC_FMT': 'Target Lag', 'MEAN_LAG_SEC_FMT': 'Mean Lag', 'MAXIMUM_LAG_SEC_FMT': 'Max Lag',
+        'TIME_ABOVE_TARGET_LAG_SEC_FMT': 'Time Above Lag', 'TIME_WITHIN_TARGET_LAG_RATIO_FMT': 'Lag Ratio (%)',
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time', 'LAST_COMPLETED_REFRESH_STATE': 'Last Refresh Status',
+        'EXECUTING_REFRESH_QUERY_ID': 'Executing Query ID', 'COLLECTION_TIMESTAMP': 'Snapshot Time'
     }
 
     df_for_display = df_for_display[[col for col in dt_health_display_columns_order if col in df_for_display.columns]].rename(columns=dt_health_display_labels)
@@ -590,7 +572,6 @@ def render_dt_health_tab(metadata_df: pd.DataFrame):
         final_filtered_metadata_df['LATEST_DATA_TIME_SORT_KEY'] = final_filtered_metadata_df.apply(
             lambda row: get_latest_data_time_sort_key(row, thresholds_for_styling), axis=1
         )
-
 
     sort_columns = []
     ascending_flags = []
