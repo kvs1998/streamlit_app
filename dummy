@@ -1,5 +1,170 @@
+    # Data Preprocessing (Unchanged)
+    if 'QUALIFIED_NAME' not in metadata_df.columns:
+        st.error("Error: 'QUALIFIED_NAME' column missing in metadata_df. Cannot proceed with DT Health tab.", icon="❌")
+        return 
+    metadata_df['QUALIFIED_NAME'] = metadata_df['QUALIFIED_NAME'].astype(str).str.upper()
+
+    required_cols_for_lookup = [
+        'DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME', 
+        'SCHEDULING_STATE_STATUS', 'LAST_COMPLETED_REFRESH_STATE', 
+        'MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TIME_WITHIN_TARGET_LAG_RATIO', 'TARGET_LAG_SEC',
+        'LATEST_DATA_TIMESTAMP',
+        'DOMAIN_NAME', # NEW: Add to required columns
+        'SUB_DOMAIN_NAME' # NEW: Add to required columns
+    ]
+    for col in required_cols_for_lookup:
+        if col not in metadata_df.columns:
+            st.warning(f"Warning: Column '{col}' missing in metadata_df. Initializing with NaNs/Defaults for safety.", icon="⚠️")
+            if col.endswith('_SEC') or col.endswith('_RATIO'):
+                metadata_df[col] = np.nan
+            elif col.endswith('_TIMESTAMP'): 
+                 metadata_df[col] = pd.NaT 
+            else: # For new string columns like DOMAIN_NAME, SUB_DOMAIN_NAME
+                metadata_df[col] = 'UNKNOWN'
+    
+    for col in ['MEAN_LAG_SEC', 'MAXIMUM_LAG_SEC', 'TIME_ABOVE_TARGET_LAG_SEC', 'TARGET_LAG_SEC']:
+        metadata_df[col] = pd.to_numeric(metadata_df[col], errors='coerce')
+    
+    metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'] = pd.to_numeric(metadata_df['TIME_WITHIN_TARGET_LAG_RATIO'], errors='coerce').fillna(0.0)
+
+    metadata_df['LATEST_DATA_TIMESTAMP'] = pd.to_datetime(metadata_df['LATEST_DATA_TIMESTAMP'], errors='coerce')
+
+    # Ensure Domain and Subdomain are strings and convert 'nan' to 'UNKNOWN' or appropriate default
+    metadata_df['DOMAIN_NAME'] = metadata_df['DOMAIN_NAME'].astype(str).replace('nan', 'UNKNOWN')
+    metadata_df['SUB_DOMAIN_NAME'] = metadata_df['SUB_DOMAIN_NAME'].astype(str).replace('nan', 'UNKNOWN')
+
+
+    # --- Keep a copy of the *original* filtered df (before legend filters) for consistency ---
+    base_filtered_df = metadata_df.copy() 
+    
+    # --- Apply Filters from Top Section ---
+    st.markdown("---")
+    st.subheader("Apply Filters for DT Health")
+
+    # Row 1: Database, Schema, Table, Scheduling State
+    filter_cols_dt_health_row1 = st.columns([1, 1, 1, 1])
+
+    with filter_cols_dt_health_row1[0]:
+        all_databases_dt_health = ['All'] + sorted(base_filtered_df['DATABASE_NAME'].unique().tolist())
+        selected_database_dt_health = st.selectbox(
+            "Database:", options=all_databases_dt_health, key="new_db_filter_dt_health"
+        )
+    with filter_cols_dt_health_row1[1]:
+        temp_df_for_schema_options = base_filtered_df.copy()
+        if selected_database_dt_health != 'All':
+            temp_df_for_schema_options = temp_df_for_schema_options[temp_df_for_schema_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+
+        if not temp_df_for_schema_options.empty:
+            schemas_in_db_dt_health = ['All'] + sorted(temp_df_for_schema_options['SCHEMA_NAME'].unique().tolist())
+        else:
+            schemas_in_db_dt_health = ['All']
+            st.info("No schemas found for selected Database.", icon="ℹ️")
+
+        selected_schema_dt_health = st.selectbox(
+            "Schema:", options=schemas_in_db_dt_health, key="new_schema_filter_dt_health"
+        )
+    
+    df_for_table_options = base_filtered_df.copy()
+    if selected_database_dt_health != 'All':
+        df_for_table_options = df_for_table_options[df_for_table_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+    if selected_schema_dt_health != 'All':
+        df_for_table_options = df_for_table_options[df_for_table_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+
+
+    with filter_cols_dt_health_row1[2]:
+        if not df_for_table_options.empty:
+            all_tables_dt_health_options = ['All'] + sorted(df_for_table_options['TABLE_NAME'].unique().tolist())
+            default_tables_dt_health_selected = ['All']
+        else:
+            all_tables_dt_health_options = ['All']
+            default_tables_dt_health_selected = ['All']
+            st.info("No tables found for selected DB/Schema.", icon="ℹ️")
+        selected_table_dt_health = st.multiselect(
+            "Table(s):", options=all_tables_dt_health_options, default=default_tables_dt_health_selected, key="new_table_filter_dt_health"
+        )
+    with filter_cols_dt_health_row1[3]:
+        all_scheduling_states = ['All'] + sorted(base_filtered_df['SCHEDULING_STATE_STATUS'].unique().tolist())
+        selected_scheduling_state = st.multiselect(
+            "Scheduling State(s):", options=all_scheduling_states, default=['All'], key="new_scheduling_state_filter_dt_health"
+        )
+    
+    # NEW ROW 2: Domain Name, Sub Domain Name
+    filter_cols_dt_health_row2_domain = st.columns([1, 1, 2]) # 1: Domain, 1: Sub Domain, 2: Spacer
+
+    with filter_cols_dt_health_row2_domain[0]:
+        # Options for Domain Name should be based on base_filtered_df (after DB/Schema/Table filters)
+        temp_df_for_domain_options = base_filtered_df.copy()
+        if selected_database_dt_health != 'All':
+            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['DATABASE_NAME'] == selected_database_dt_health].copy()
+        if selected_schema_dt_health != 'All':
+            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+        if selected_table_dt_health and 'All' not in selected_table_dt_health:
+            temp_df_for_domain_options = temp_df_for_domain_options[temp_df_for_domain_options['TABLE_NAME'].isin(selected_table_dt_health)].copy()
+
+        if not temp_df_for_domain_options.empty:
+            all_domain_names = ['All'] + sorted(temp_df_for_domain_options['DOMAIN_NAME'].unique().tolist())
+        else:
+            all_domain_names = ['All']
+            st.info("No Domain Names found for current selections.", icon="ℹ️")
+        selected_domain_name = st.selectbox(
+            "Domain Name:", options=all_domain_names, key="new_domain_filter_dt_health"
+        )
+
+    with filter_cols_dt_health_row2_domain[1]:
+        # Options for Sub Domain Name should be based on previous filters including Domain Name
+        temp_df_for_subdomain_options = temp_df_for_domain_options.copy() # Starts from df filtered by DB/Schema/Table
+        if selected_domain_name != 'All':
+            temp_df_for_subdomain_options = temp_df_for_subdomain_options[temp_df_for_subdomain_options['DOMAIN_NAME'] == selected_domain_name].copy()
+
+        if not temp_df_for_subdomain_options.empty:
+            all_sub_domain_names = ['All'] + sorted(temp_df_for_subdomain_options['SUB_DOMAIN_NAME'].unique().tolist())
+        else:
+            all_sub_domain_names = ['All']
+            st.info("No Sub Domain Names found for current selections.", icon="ℹ️")
+        selected_sub_domain_name = st.selectbox(
+            "Sub Domain Name:", options=all_sub_domain_names, key="new_subdomain_filter_dt_health"
+        )
+
+    # Original Row 2 (now Row 3 conceptually): Time Format
+    filter_cols_dt_health_row3_time_format = st.columns([1])
+    with filter_cols_dt_health_row3_time_format[0]:
+        time_format_option = st.radio(
+            "Display Lag Times In:", 
+            options=["mixed", "seconds", "minutes", "hours", "days"], 
+            index=0,
+            horizontal=True,
+            key="new_time_format_dt_health"
+        )
+    
+    st.markdown("---")
+
+    # --- Apply All Top-Level Filters to Main DataFrame (re-filter based on user selections) ---
+    # Start with a fresh copy of the full metadata_df for filtering based on *all* selections
+    final_filtered_metadata_df = metadata_df.copy()
+
+    if selected_database_dt_health != 'All':
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DATABASE_NAME'] == selected_database_dt_health].copy()
+    if selected_schema_dt_health != 'All':
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEMA_NAME'] == selected_schema_dt_health].copy()
+    if selected_table_dt_health and 'All' not in selected_table_dt_health:
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['TABLE_NAME'].isin(selected_table_dt_health)].copy()
+    elif not selected_table_dt_health:
+        st.warning("No table(s) selected. Display will be empty.", icon="⚠️")
+        final_filtered_metadata_df = pd.DataFrame()
+
+    if selected_scheduling_state and 'All' not in selected_scheduling_state:
+        final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_state)].copy()
+    elif not selected_scheduling_state:
+        st.warning("No scheduling state(s) selected. Display will be empty.", icon="⚠️")
+        final_filtered_metadata_df = pd.DataFrame()
+
     # NEW: Apply Domain and Sub Domain filters
     if selected_domain_name != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['DOMAIN_NAME'] == selected_domain_name].copy()
     if selected_sub_domain_name != 'All':
         final_filtered_metadata_df = final_filtered_metadata_df[final_filtered_metadata_df['SUB_DOMAIN_NAME'] == selected_sub_domain_name].copy()
+
+
+    if final_filtered_metadata_df.empty:
+        st.info("No data available based on current filter selections. Please adjust your filters.", icon="ℹ️")
+        return
