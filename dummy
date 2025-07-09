@@ -1,21 +1,24 @@
-import streamlit as st
-from pathlib import Path
-import base64
+with open(image_path, "rb") as f:
+    encoded = base64.b64encode(f.read()).decode()
 
-# Load image as base64
-image_path = Path(__file__).parent / "images" / "blackrock_logo.png"
-with open(image_path, "rb") as img_file:
-    encoded_img = base64.b64encode(img_file.read()).decode()
-
-# Sidebar content
-st.sidebar.header("My Dashboard")
-st.sidebar.write("Some sidebar content...")
-
-# Place image at the bottom of the sidebar
-st.sidebar.markdown(
+# Inject custom CSS + image at top of sidebar
+st.markdown(
     f"""
-    <div style="position: fixed; bottom: 10px; left: 10px;">
-        <img src="data:image/png;base64,{encoded_img}" width="150">
+    <style>
+    [data-testid="stSidebar"] > div:first-child {{
+        padding-top: 150px; /* Leave space for logo */
+        position: relative;
+    }}
+    .sidebar-logo {{
+        position: absolute;
+        top: 10px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 150px;
+    }}
+    </style>
+    <div class="sidebar-logo">
+        <img src="data:image/png;base64,{encoded}" />
     </div>
     """,
     unsafe_allow_html=True
