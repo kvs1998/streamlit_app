@@ -22,8 +22,8 @@ DECLARE
     lv_message VARCHAR DEFAULT '';
     lv_total_tables_found INTEGER DEFAULT 0;
     lv_jobs_launched_count INTEGER DEFAULT 0;
-    lv_overall_success_count INTEGER DEFAULT 0;
-    lv_overall_fail_count INTEGER DEFAULT 0;
+    lv_overall_success_count INTEGER DEFAULT 0; -- Will be calculated at the end from tracking table
+    lv_overall_fail_count INTEGER DEFAULT 0;    -- Will be calculated at the end from tracking table
     lv_db_name VARCHAR;
     lv_schema_name VARCHAR;
     lv_table_name VARCHAR;
@@ -51,12 +51,10 @@ DECLARE
     lv_tracking_update_staging_table_fqdn VARCHAR;
 
     -- --- Batching Variables ---
-    -- lv_current_batch_count INTEGER DEFAULT 0; -- No longer needed for explicit query_id tracking
-    lv_batch_query_ids ARRAY DEFAULT []; -- Stores QUERY_IDs for the current batch
-    lv_all_launched_query_ids ARRAY DEFAULT []; -- Stores ALL launched QUERY_IDs for overall status check
+    lv_current_batch_submissions INTEGER DEFAULT 0; -- Counter for jobs submitted in the current batch
 
     -- --- Consistency Flag ---
-    lv_any_async_job_failed_overall BOOLEAN DEFAULT FALSE; 
+    lv_any_async_job_failed_overall BOOLEAN DEFAULT FALSE; -- Flag for overall driver run status (based on tracking table)
 
     -- Cursor to select active tables needing collection
     c_tables CURSOR FOR
@@ -115,45 +113,52 @@ BEGIN
         lv_refresh_history_days := record_row.COLLECT_REFRESH_HISTORY_DAYS;
         lv_metadata_days := record_row.COLLECT_METADATA_DAYS;
 
-        DECLARE
-            launched_query_id VARCHAR;
         BEGIN -- Inner BEGIN/END block for per-table ASYNC job submission error handling
             lv_message := lv_message || '  Submitting jobs for table: ' || lv_qualified_name || '\n';
 
             -- Launch SP_COLLECT_DT_REFRESH_HISTORY ASYNC
             IF (lv_track_refresh_history) THEN
-                SELECT SYSTEM$ASYNC_CALL(
-                    :LV_REFRESH_HISTORY_PROC_FQDN,
-                    :lv_db_name, :lv_schema_name, :lv_table_name, :lv_refresh_history_days,
-                    :lv_refresh_history_staging_table_fqdn, :lv_tracking_update_staging_table_fqdn, :lv_driver_run_uuid
-                ) INTO launched_query_id; -- Capture the query_id explicitly
+                ASYNC (
+                    CALL IDENTIFIER(:LV_REFRESH_HISTORY_PROC_FQDN)(
+                        :lv_db_name, :lv_schema_name, :lv_table_name, :lv_refresh_history_days,
+                        :lv_refresh_history_staging_table_fqdn, :lv_tracking_update_staging_table_fqdn, :lv_driver_run_uuid
+                    )
+                );
                 lv_jobs_launched_count := lv_jobs_launched_count + 1;
-                lv_batch_query_ids := ARRAY_APPEND(:lv_batch_query_ids, launched_query_id); -- Add to current batch
-                lv_all_launched_query_ids := ARRAY_APPEND(:lv_all_launched_query_ids, launched_query_id); -- Add to overall
-                lv_message := lv_message || '    Refresh History job ' || launched_query_id || ' submitted ASYNC.\n';
+                lv_current_batch_submissions := lv_current_batch_submissions + 1; -- Increment batch counter
+                lv_message := lv_message || '    Refresh History job submitted ASYNC.\n';
             END IF;
 
             -- Launch SP_COLLECT_DYNAMIC_TABLE_METADATA ASYNC
             IF (lv_track_metadata_snapshot) THEN
-                SELECT SYSTEM$ASYNC_CALL(
-                    :LV_METADATA_PROC_FQDN,
-                    :lv_db_name, :lv_schema_name, :lv_table_name,
-                    :lv_metadata_staging_table_fqdn, :lv_tracking_update_staging_table_fqdn, :lv_driver_run_uuid
-                ) INTO launched_query_id; -- Capture the query_id explicitly
+                ASYNC (
+                    CALL IDENTIFIER(:LV_METADATA_PROC_FQDN)(
+                        :lv_db_name, :lv_schema_name, :lv_table_name,
+                        :lv_metadata_staging_table_fqdn, :lv_tracking_update_staging_table_fqdn, :lv_driver_run_uuid
+                    )
+                );
                 lv_jobs_launched_count := lv_jobs_launched_count + 1;
-                lv_batch_query_ids := ARRAY_APPEND(:lv_batch_query_ids, launched_query_id); -- Add to current batch
-                lv_all_launched_query_ids := ARRAY_APPEND(:lv_all_launched_query_ids, launched_query_id); -- Add to overall
-                lv_message := lv_message || '    Metadata Snapshot job ' || launched_query_id || ' submitted ASYNC.\n';
+                lv_current_batch_submissions := lv_current_batch_submissions + 1; -- Increment batch counter
+                lv_message := lv_message || '    Metadata Snapshot job submitted ASYNC.\n';
             END IF;
 
             -- Add logic for TRACK_GRAPH_HISTORY if you implement that procedure later
 
-            -- Check if current batch size is reached.
-            IF (P_ASYNC_BATCH_SIZE > 0 AND ARRAY_SIZE(:lv_batch_query_ids) >= P_ASYNC_BATCH_SIZE) THEN
+            -- NEW: Check if current batch size is reached.
+            -- Await ALL jobs submitted *since the last AWAIT ALL*
+            IF (P_ASYNC_BATCH_SIZE > 0 AND lv_current_batch_submissions >= P_ASYNC_BATCH_SIZE) THEN
                 lv_message := lv_message || '    Batch limit reached (' || P_ASYNC_BATCH_SIZE || '). Awaiting batch completion...\n';
-                AWAIT (:lv_batch_query_ids); -- Wait for jobs in the current batch
-                lv_message := lv_message || '    Batch completed.\n';
-                lv_batch_query_ids := ARRAY_CONSTRUCT(); -- Reset batch for next iteration
+                BEGIN -- NEW: Inner EXCEPTION block to catch AWAIT ALL errors for this batch
+                    AWAIT ALL; -- This awaits all ASYNC jobs launched *since the last AWAIT ALL*
+                    lv_message := lv_message || '    Batch completed successfully.\n';
+                EXCEPTION
+                    WHEN OTHER THEN
+                        -- If AWAIT ALL itself fails, it means one or more child jobs failed.
+                        lv_any_async_job_failed_overall := TRUE;
+                        lv_loop_error_message := 'ERROR awaiting ASYNC batch completion: ' || SQLERRM();
+                        lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
+                END;
+                lv_current_batch_submissions := 0; -- Reset batch count
             END IF;
 
         EXCEPTION
@@ -161,7 +166,6 @@ BEGIN
                 lv_loop_error_message := 'ERROR submitting ASYNC job(s) for ' || lv_qualified_name || ': ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
                 -- If submission fails, log this direct submission error into the tracking staging table
-                -- We insert for both types for comprehensive logging, as ASYNC submission error affects both potential jobs.
                 EXECUTE IMMEDIATE '
                     INSERT INTO IDENTIFIER(?) (
                         QUALIFIED_NAME, JOB_TYPE, STATUS, MESSAGE, COLLECTION_TIMESTAMP, DRIVER_RUN_UUID
@@ -179,47 +183,40 @@ BEGIN
     END LOOP;
 
     -- AWAIT ALL for any remaining jobs from the last (incomplete) batch
-    IF (ARRAY_SIZE(:lv_batch_query_ids) > 0) THEN
+    IF (lv_current_batch_submissions > 0) THEN
         lv_message := lv_message || 'Last batch (partial) submitted. Awaiting remaining jobs...\n';
-        AWAIT (:lv_batch_query_ids); -- Wait for remaining jobs
-        lv_message := lv_message || 'Remaining jobs completed.\n';
+        BEGIN -- NEW: Inner EXCEPTION block to catch AWAIT ALL errors for the final partial batch
+            AWAIT ALL; -- This awaits all remaining ASYNC jobs
+            lv_message := lv_message || 'Remaining jobs completed successfully.\n';
+        EXCEPTION
+            WHEN OTHER THEN
+                lv_any_async_job_failed_overall := TRUE; -- Mark overall run as failed
+                lv_loop_error_message := 'ERROR awaiting final ASYNC batch completion: ' || SQLERRM();
+                lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
+        END;
     END IF;
 
     lv_driver_run_end_time := CURRENT_TIMESTAMP();
-    lv_message := lv_message || 'All ASYNC jobs completed. Checking status and merging collected data...\n';
+    lv_message := lv_message || 'All ASYNC jobs completion process finalized. Checking overall status...\n';
 
-    -- --- NEW STEP: Check status of all launched ASYNC jobs more robustly ---
-    -- Query the query history for the launched ASYNC jobs using their collected QUERY_IDs
-    DECLARE
-        c_async_job_results CURSOR FOR
-            SELECT
-                QUERY_ID,
-                STATUS,
-                ERROR_MESSAGE,
-                RETURN_VALUE -- If child procs return status/message
-            FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) -- LAST_QUERY_ID() here refers to the AWAIT call's ID.
-                                                    -- Or, if that's still flaky, query ACCOUNT_USAGE.QUERY_HISTORY
-            WHERE QUERY_ID IN (SELECT VALUE FROM TABLE(FLATTEN(input => :lv_all_launched_query_ids)))
-              AND QUERY_TYPE = 'CALL'; -- Ensure we only look at PROCEDURE CALLS
-                                       -- STATUS in result_scan/query_history tells overall success of the ASYNC job execution
-    BEGIN
-        FOR async_job_record IN c_async_job_results DO
-            IF (async_job_record.STATUS != 'SUCCESS') THEN
-                lv_any_async_job_failed_overall := TRUE;
-                lv_message := lv_message || '  ASYNC Job ' || async_job_record.QUERY_ID || ' FAILED with status: ' || async_job_record.STATUS || ' Message: ' || NVL(async_job_record.ERROR_MESSAGE, 'N/A') || '\n';
-            END IF;
-        END FOR;
-    END;
-
-    IF (lv_any_async_job_failed_overall) THEN
-        lv_message := lv_message || 'FAILURE DETECTED: One or more ASYNC jobs failed. Skipping merges to main tables.\n';
+    -- --- NEW STEP: Check status of all launched ASYNC jobs from the tracking staging table ---
+    -- This step is crucial and queries the tracking_update_staging_table which children populated.
+    -- This gives deterministic status for *this* driver run.
+    SELECT COUNT(*) INTO lv_overall_fail_count
+    FROM IDENTIFIER(:lv_tracking_update_staging_table_fqdn)
+    WHERE DRIVER_RUN_UUID = :lv_driver_run_uuid
+      AND STATUS != 'SUCCESS';
+    
+    IF (lv_overall_fail_count > 0) THEN
+        lv_any_async_job_failed_overall := TRUE;
+        lv_message := lv_message || 'FAILURE DETECTED: ' || lv_overall_fail_count || ' ASYNC job(s) reported non-SUCCESS status in tracking table for this run.\n';
     ELSE
-        lv_message := lv_message || 'All ASYNC jobs reported SUCCESS. Proceeding with merges.\n';
+        lv_message := lv_message || 'All ASYNC jobs reported SUCCESS in tracking table for this run.\n';
     END IF;
 
     -- --- Step 3: Conditional Merges based on overall success ---
     -- Wrap all critical merges in a single transaction
-    BEGIN TRANSACTION; -- NEW: Explicit transaction for data consistency
+    BEGIN TRANSACTION; -- Explicit transaction for data consistency
 
     IF (NOT lv_any_async_job_failed_overall) THEN
         -- --- Perform final MERGE operations from staging tables (Data Merges) ---
