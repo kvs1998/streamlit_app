@@ -1,11 +1,11 @@
 -- Main Driver Stored Procedure - Orchestrates collection for all tracked tables
--- UPDATED to return structured JSON object with audit info
+-- REVISED to rely entirely on P_TRACKING_STAGING_TABLE_FQDN for audit and failure detection
 -- Replace YOUR_DB and YOUR_SCHEMA.
 
 CREATE OR REPLACE PROCEDURE YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
-    P_ASYNC_BATCH_SIZE NUMBER -- NEW PARAMETER for controlling concurrency
+    P_ASYNC_BATCH_SIZE NUMBER -- Parameter for controlling ASYNC concurrency
 )
-RETURNS VARIANT -- Changed return type to VARIANT (JSON object)
+RETURNS VARIANT -- Returns JSON object for structured audit
 LANGUAGE SQL
 EXECUTE AS CALLER
 AS
@@ -21,9 +21,9 @@ DECLARE
     -- --- Internal Variables ---
     lv_message VARCHAR DEFAULT '';
     lv_total_tables_found INTEGER DEFAULT 0;
-    lv_jobs_launched_count INTEGER DEFAULT 0;
-    lv_overall_success_count INTEGER DEFAULT 0;
-    lv_overall_fail_count INTEGER DEFAULT 0;
+    lv_jobs_launched_count INTEGER DEFAULT 0; -- Count of ASYNC calls submitted
+    lv_overall_success_count INTEGER DEFAULT 0; -- Based on tracking table at end
+    lv_overall_fail_count INTEGER DEFAULT 0;    -- Based on tracking table at end
     lv_db_name VARCHAR;
     lv_schema_name VARCHAR;
     lv_table_name VARCHAR;
@@ -38,7 +38,7 @@ DECLARE
 
     lv_driver_run_start_time TIMESTAMP_LTZ;
     lv_driver_run_end_time TIMESTAMP_LTZ;
-    lv_driver_run_uuid VARCHAR := UUID_STRING(); -- Unique ID for this driver run
+    lv_driver_run_uuid VARCHAR := UUID_STRING();
 
     -- --- Staging Table Variables ---
     lv_refresh_history_staging_table_name VARCHAR;
@@ -46,16 +46,15 @@ DECLARE
     lv_metadata_staging_table_name VARCHAR;
     lv_metadata_staging_table_fqdn VARCHAR;
 
-    -- Temporary table to store tracking updates from child procedures
     lv_tracking_update_staging_table_name VARCHAR;
     lv_tracking_update_staging_table_fqdn VARCHAR;
 
     -- --- Batching Variables ---
-    lv_current_batch_submissions INTEGER DEFAULT 0; -- Counter for jobs submitted in the current batch
+    lv_current_batch_submissions INTEGER DEFAULT 0;
 
     -- --- Consistency Flag ---
-    lv_any_async_job_failed_overall BOOLEAN DEFAULT FALSE; -- Flag for overall driver run status (based on tracking table)
-    lv_driver_overall_status VARCHAR; -- Will be 'SUCCESS' or 'FAILED_OVERALL'
+    lv_any_async_job_reported_failure BOOLEAN DEFAULT FALSE; -- NEW: Flag for overall driver run status (based on child reports)
+    lv_driver_overall_status VARCHAR; -- 'SUCCESS' or 'FAILED_OVERALL'
 
     -- --- Timing Variables ---
     lv_async_launch_start_time TIMESTAMP_LTZ;
@@ -65,6 +64,8 @@ DECLARE
     lv_merges_start_time TIMESTAMP_LTZ;
     lv_merges_end_time TIMESTAMP_LTZ;
 
+    -- --- Audit Details List ---
+    lv_job_audit_details ARRAY DEFAULT []; -- To store specific success/failure details for return JSON
 
     -- Cursor to select active tables needing collection
     c_tables CURSOR FOR
@@ -78,7 +79,7 @@ DECLARE
 BEGIN
     lv_driver_run_start_time := CURRENT_TIMESTAMP();
     lv_message := lv_message || 'Starting DYNAMIC TABLE COLLECTION DRIVER (UUID: ' || lv_driver_run_uuid || ') at ' || lv_driver_run_start_time || '\n';
-    lv_driver_overall_status := 'FAILED_OVERALL'; -- Default to FAILED, set to SUCCESS only at the very end
+    lv_driver_overall_status := 'FAILED_OVERALL';
 
     -- --- Step 1: Create Global Temporary Staging Tables (Once per driver run) ---
     lv_refresh_history_staging_table_name := 'T_REFRESH_HISTORY_STAGE_' || REPLACE(UUID_STRING(), '-', '');
@@ -91,6 +92,7 @@ BEGIN
     EXECUTE IMMEDIATE 'CREATE OR REPLACE TEMPORARY TABLE ' || :lv_metadata_staging_table_fqdn || ' LIKE ' || :LV_FINAL_METADATA_TABLE_FQDN || ';';
     lv_message := lv_message || 'Created temporary metadata staging table: ' || lv_metadata_staging_table_fqdn || '\n';
 
+    -- Temporary table to store tracking updates from child procedures (NO ASYNC_QUERY_ID column needed)
     lv_tracking_update_staging_table_name := 'T_TRACKING_UPDATE_STAGE_' || REPLACE(UUID_STRING(), '-', '');
     lv_tracking_update_staging_table_fqdn := 'YOUR_DB.YOUR_SCHEMA.' || lv_tracking_update_staging_table_name;
     EXECUTE IMMEDIATE 'CREATE OR REPLACE TEMPORARY TABLE ' || :lv_tracking_update_staging_table_fqdn || ' (
@@ -105,7 +107,7 @@ BEGIN
 
 
     -- --- Step 2: Launch ASYNC collection jobs for each table in batches ---
-    lv_async_launch_start_time := CURRENT_TIMESTAMP(); -- Start timing async launch
+    lv_async_launch_start_time := CURRENT_TIMESTAMP();
     FOR record_row IN c_tables DO
         lv_total_tables_found := lv_total_tables_found + 1;
 
@@ -119,7 +121,7 @@ BEGIN
         lv_refresh_history_days := record_row.COLLECT_REFRESH_HISTORY_DAYS;
         lv_metadata_days := record_row.COLLECT_METADATA_DAYS;
 
-        BEGIN
+        BEGIN -- Inner BEGIN/END block for per-table ASYNC job submission error handling
             lv_message := lv_message || '  Submitting jobs for table: ' || lv_qualified_name || '\n';
 
             IF (lv_track_refresh_history) THEN
@@ -146,83 +148,112 @@ BEGIN
                 lv_message := lv_message || '    Metadata Snapshot job submitted ASYNC.\n';
             END IF;
 
+            -- Add logic for TRACK_GRAPH_HISTORY if you implement that procedure later
+
             -- Check if current batch size is reached.
             IF (P_ASYNC_BATCH_SIZE > 0 AND lv_current_batch_submissions >= P_ASYNC_BATCH_SIZE) THEN
                 lv_message := lv_message || '    Batch limit reached (' || P_ASYNC_BATCH_SIZE || '). Awaiting batch completion...\n';
-                lv_async_await_start_time := CURRENT_TIMESTAMP(); -- Start timing await
+                lv_async_await_start_time := COALESCE(lv_async_await_start_time, CURRENT_TIMESTAMP());
                 BEGIN
                     AWAIT ALL;
-                    lv_async_await_end_time := CURRENT_TIMESTAMP(); -- End timing await
+                    lv_async_await_end_time := CURRENT_TIMESTAMP();
                     lv_message := lv_message || '    Batch completed successfully in ' || DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time) / 1000 || 's.\n';
                 EXCEPTION
                     WHEN OTHER THEN
-                        lv_any_async_job_failed_overall := TRUE;
+                        -- AWAIT ALL fails means at least one child job failed.
+                        lv_any_async_job_reported_failure := TRUE;
                         lv_loop_error_message := 'ERROR awaiting ASYNC batch completion: ' || SQLERRM();
                         lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
-                        lv_async_await_end_time := CURRENT_TIMESTAMP(); -- End timing await even on error
+                        lv_async_await_end_time := CURRENT_TIMESTAMP();
                 END;
                 lv_current_batch_submissions := 0;
             END IF;
 
         EXCEPTION
             WHEN OTHER THEN
-                lv_loop_error_message := 'ERROR submitting ASYNC job(s) for ' || lv_qualified_name || ': ' || SQLERRM();
+                lv_loop_error_message := 'UNEXPECTED ERROR during ASYNC job submission/batch management for ' || lv_qualified_name || ': ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
+                -- If submission fails (not just ASYNC call failed), also log to tracking and mark overall failure
                 EXECUTE IMMEDIATE '
                     INSERT INTO IDENTIFIER(?) (
                         QUALIFIED_NAME, JOB_TYPE, STATUS, MESSAGE, COLLECTION_TIMESTAMP, DRIVER_RUN_UUID
-                    ) VALUES (?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?);
                 ' USING lv_tracking_update_staging_table_fqdn, lv_qualified_name, 'REFRESH_HISTORY', 'FAILED_SUBMISSION', :lv_loop_error_message, CURRENT_TIMESTAMP(), lv_driver_run_uuid;
                  EXECUTE IMMEDIATE '
                     INSERT INTO IDENTIFIER(?) (
                         QUALIFIED_NAME, JOB_TYPE, STATUS, MESSAGE, COLLECTION_TIMESTAMP, DRIVER_RUN_UUID
-                    ) VALUES (?, ?, ?, ?, ?, ?);
+                    ) VALUES (?, ?, ?, ?, ?);
                 ' USING lv_tracking_update_staging_table_fqdn, lv_qualified_name, 'METADATA_SNAPSHOT', 'FAILED_SUBMISSION', :lv_loop_error_message, CURRENT_TIMESTAMP(), lv_driver_run_uuid;
                 
-                lv_any_async_job_failed_overall := TRUE;
+                lv_any_async_job_reported_failure := TRUE;
         END;
     END LOOP;
-    lv_async_launch_end_time := CURRENT_TIMESTAMP(); -- End timing async launch
+    lv_async_launch_end_time := CURRENT_TIMESTAMP();
 
     -- AWAIT ALL for any remaining jobs from the last (incomplete) batch
     IF (lv_current_batch_submissions > 0) THEN
         lv_message := lv_message || 'Last batch (partial) submitted. Awaiting remaining jobs...\n';
-        lv_async_await_start_time := COALESCE(lv_async_await_start_time, CURRENT_TIMESTAMP()); -- Start timing if not already started
+        lv_async_await_start_time := COALESCE(lv_async_await_start_time, CURRENT_TIMESTAMP());
         BEGIN
             AWAIT ALL;
             lv_async_await_end_time := CURRENT_TIMESTAMP();
             lv_message := lv_message || 'Remaining jobs completed successfully in ' || DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time) / 1000 || 's.\n';
         EXCEPTION
             WHEN OTHER THEN
-                lv_any_async_job_failed_overall := TRUE;
+                lv_any_async_job_reported_failure := TRUE;
                 lv_loop_error_message := 'ERROR awaiting final ASYNC batch completion: ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
                 lv_async_await_end_time := CURRENT_TIMESTAMP();
         END;
     END IF;
 
-    lv_driver_run_end_time := CURRENT_TIMESTAMP(); -- Overall end time captured before final summary/return
-
-    lv_message := lv_message || 'All ASYNC jobs completion process finalized. Checking overall status...\n';
-
-    -- --- NEW STEP: Check status of all launched ASYNC jobs from the tracking staging table ---
-    SELECT COUNT(*) INTO lv_overall_fail_count
-    FROM IDENTIFIER(:lv_tracking_update_staging_table_fqdn)
-    WHERE DRIVER_RUN_UUID = :lv_driver_run_uuid
-      AND STATUS != 'SUCCESS';
+    -- --- STEP: Consolidate ASYNC Job Statuses from TRACKING STAGING TABLE ---
+    -- This provides the definitive audit trail for this driver run, as reported by children.
+    lv_message := lv_message || 'Consolidating ASYNC job statuses from tracking staging table...\n';
     
-    IF (lv_overall_fail_count > 0) THEN
-        lv_any_async_job_failed_overall := TRUE;
-        lv_message := lv_message || 'FAILURE DETECTED: ' || lv_overall_fail_count || ' ASYNC job(s) reported non-SUCCESS status in tracking table for this run.\n';
+    DECLARE
+        c_tracking_results CURSOR FOR
+            SELECT QUALIFIED_NAME, JOB_TYPE, STATUS, MESSAGE
+            FROM IDENTIFIER(:lv_tracking_update_staging_table_fqdn)
+            WHERE DRIVER_RUN_UUID = :lv_driver_run_uuid
+            ORDER BY QUALIFIED_NAME, JOB_TYPE;
+        
+        job_status VARCHAR;
+        job_message VARCHAR;
+    BEGIN
+        FOR tracking_record IN c_tracking_results DO
+            job_status := tracking_record.STATUS;
+            job_message := tracking_record.MESSAGE;
+
+            IF (job_status != 'SUCCESS') THEN
+                lv_any_async_job_reported_failure := TRUE; -- If any job is non-SUCCESS, flag overall
+                lv_message := lv_message || '  JOB STATUS: ' || tracking_record.QUALIFIED_NAME || ' (' || tracking_record.JOB_TYPE || ') -> FAILED: ' || job_message || '\n';
+            ELSE
+                lv_message := lv_message || '  JOB STATUS: ' || tracking_record.QUALIFIED_NAME || ' (' || tracking_record.JOB_TYPE || ') -> SUCCESS: ' || job_message || '\n';
+            END IF;
+
+            -- Populate audit details array for return JSON
+            lv_job_audit_details := ARRAY_APPEND(:lv_job_audit_details, OBJECT_CONSTRUCT(
+                'qualified_name', tracking_record.QUALIFIED_NAME,
+                'job_type', tracking_record.JOB_TYPE,
+                'status', job_status,
+                'message', job_message
+            ));
+        END FOR;
+    END;
+    lv_message := lv_message || 'ASYNC job status consolidation complete.\n';
+
+    IF (lv_any_async_job_reported_failure) THEN
+        lv_message := lv_message || 'FAILURE DETECTED: One or more ASYNC jobs reported non-SUCCESS status. Skipping merges to main tables and rolling back.\n';
     ELSE
-        lv_message := lv_message || 'All ASYNC jobs reported SUCCESS in tracking table for this run.\n';
+        lv_message := lv_message || 'All ASYNC jobs reported SUCCESS. Proceeding with merges.\n';
     END IF;
 
     -- --- Step 3: Conditional Merges based on overall success ---
-    BEGIN TRANSACTION;
+    BEGIN TRANSACTION; -- Explicit transaction for data consistency
 
-    IF (NOT lv_any_async_job_failed_overall) THEN
-        lv_merges_start_time := CURRENT_TIMESTAMP(); -- Start timing merges
+    IF (NOT lv_any_async_job_reported_failure) THEN
+        lv_merges_start_time := CURRENT_TIMESTAMP();
 
         -- MERGE Refresh History Data
         BEGIN
@@ -268,7 +299,7 @@ BEGIN
             WHEN OTHER THEN
                 lv_loop_error_message := 'ERROR merging Refresh History: ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
-                lv_any_async_job_failed_overall := TRUE;
+                lv_any_async_job_reported_failure := TRUE; -- Mark for rollback
         END;
 
         -- MERGE Metadata Snapshot Data
@@ -323,7 +354,7 @@ BEGIN
             WHEN OTHER THEN
                 lv_loop_error_message := 'ERROR merging Metadata Snapshot: ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
-                lv_any_async_job_failed_overall := TRUE;
+                lv_any_async_job_reported_failure := TRUE;
         END;
 
         -- --- Merge Tracking Status Updates from Staging ---
@@ -360,24 +391,23 @@ BEGIN
             WHEN OTHER THEN
                 lv_loop_error_message := 'ERROR merging tracking status: ' || SQLERRM();
                 lv_message := lv_message || '    ' || lv_loop_error_message || '\n';
-                lv_any_async_job_failed_overall := TRUE;
+                lv_any_async_job_reported_failure := TRUE;
         END;
-        lv_merges_end_time := CURRENT_TIMESTAMP(); -- End timing merges
+        lv_merges_end_time := CURRENT_TIMESTAMP();
     ELSE
         lv_message := lv_message || 'Skipping merges to main tables due to previously detected ASYNC job failures.\n';
-        -- Set merge times to 0 if skipped
         lv_merges_start_time := lv_driver_run_end_time;
         lv_merges_end_time := lv_driver_run_end_time;
-    END IF; -- End of IF (NOT lv_any_async_job_failed_overall) block
+    END IF;
 
     -- --- Conditional COMMIT or ROLLBACK for the main transaction ---
-    IF (lv_any_async_job_failed_overall) THEN
+    IF (lv_any_async_job_reported_failure) THEN
         ROLLBACK;
         lv_message := lv_message || 'Main transaction ROLLED BACK due to detected ASYNC job failures or merge errors.\n';
     ELSE
         COMMIT;
         lv_message := lv_message || 'Main transaction COMMITTED successfully.\n';
-        lv_driver_overall_status := 'SUCCESS'; -- Only set to SUCCESS if no failures and committed
+        lv_driver_overall_status := 'SUCCESS';
     END IF;
 
 
@@ -388,6 +418,7 @@ BEGIN
     lv_message := lv_message || 'Cleaned up all temporary staging tables.\n';
 
     -- --- Step 7: Final Summary and Return ---
+    -- Recalculate success/fail counts based on the tracking staging table
     SELECT COUNT(*) INTO lv_overall_success_count
     FROM IDENTIFIER(:lv_tracking_update_staging_table_fqdn)
     WHERE DRIVER_RUN_UUID = :lv_driver_run_uuid
@@ -399,7 +430,7 @@ BEGIN
       AND STATUS != 'SUCCESS';
 
 
-    lv_driver_run_end_time := CURRENT_TIMESTAMP(); -- Final timestamp for total duration calculation
+    lv_driver_run_end_time := CURRENT_TIMESTAMP();
 
     lv_message := lv_message || 'Total tables in tracking: ' || lv_total_tables_found || '\n';
     lv_message := lv_message || 'Total ASYNC Jobs launched: ' || lv_jobs_launched_count || '\n';
@@ -418,10 +449,11 @@ BEGIN
         'total_jobs_launched', lv_jobs_launched_count,
         'total_async_jobs_succeeded', lv_overall_success_count,
         'total_async_jobs_failed', lv_overall_fail_count,
+        'job_audit_details', lv_job_audit_details, -- NEW: Detailed audit list
         'phase_durations_sec', OBJECT_CONSTRUCT(
-            'async_launch_duration_sec', DATEDIFF('millisecond', lv_async_launch_start_time, lv_async_launch_end_time) / 1000,
-            'async_await_duration_sec', DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time) / 1000,
-            'merge_duration_sec', DATEDIFF('millisecond', lv_merges_start_time, lv_merges_end_time) / 1000
+            'async_launch_duration_sec', NVL(DATEDIFF('millisecond', lv_async_launch_start_time, lv_async_launch_end_time), 0) / 1000,
+            'async_await_duration_sec', NVL(DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time), 0) / 1000,
+            'merge_duration_sec', NVL(DATEDIFF('millisecond', lv_merges_start_time, lv_merges_end_time), 0) / 1000
         ),
         'total_run_duration_sec', DATEDIFF('millisecond', lv_driver_run_start_time, lv_driver_run_end_time) / 1000
     );
@@ -430,17 +462,18 @@ EXCEPTION
     WHEN OTHER THEN
         ROLLBACK;
         lv_error_message_overall := 'CRITICAL ERROR in DYNAMIC TABLE COLLECTION DRIVER (Unhandled): ' || SQLERRM();
-        -- Construct basic error JSON object for audit purposes
+        -- Construct basic error JSON object for audit purposes on critical failure
         RETURN OBJECT_CONSTRUCT(
             'status', 'CRITICAL_FAILURE',
             'message', lv_error_message_overall,
             'driver_run_uuid', lv_driver_run_uuid,
             'start_time', lv_driver_run_start_time,
-            'end_time', CURRENT_TIMESTAMP(), -- Capture end time at point of error
-            'total_tables_found', lv_total_tables_found,
-            'total_jobs_launched', lv_jobs_launched_count,
-            'total_async_jobs_succeeded', 0, -- Assuming 0 successful if critical failure
-            'total_async_jobs_failed', lv_jobs_launched_count, -- Assuming all failed implicitly
+            'end_time', CURRENT_TIMESTAMP(),
+            'total_tables_found', NVL(lv_total_tables_found, 0),
+            'total_jobs_launched', NVL(lv_jobs_launched_count, 0),
+            'total_async_jobs_succeeded', 0,
+            'total_async_jobs_failed', NVL(lv_jobs_launched_count, 0),
+            'job_audit_details', lv_job_audit_details, -- Still include any partial audit collected
             'phase_durations_sec', OBJECT_CONSTRUCT(
                 'async_launch_duration_sec', NVL(DATEDIFF('millisecond', lv_async_launch_start_time, lv_async_launch_end_time), 0) / 1000,
                 'async_await_duration_sec', NVL(DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time), 0) / 1000,
