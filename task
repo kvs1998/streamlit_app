@@ -1,0 +1,20 @@
+-- Replace placeholders YOUR_DB, YOUR_SCHEMA, YOUR_WAREHOUSE
+-- And adjust schedule, batch size as needed.
+
+CREATE OR REPLACE TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK
+  WAREHOUSE = YOUR_WAREHOUSE_NAME -- Or omit for serverless & use USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE
+  -- USER_TASK_MANAGED_INITIAL_WAREHOUSE_SIZE = 'MEDIUM' -- Example for serverless
+  SCHEDULE = 'USING CRON 0 3 * * * America/Los_Angeles' -- Example: Daily at 3:00 AM PST
+  ALLOW_OVERLAPPING_EXECUTION = FALSE -- Prevent concurrent runs of this task
+  USER_TASK_TIMEOUT_MS = 14400000 -- Example: 4 hours (4 * 3600 * 1000 ms)
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3 -- Suspend if 3 consecutive runs fail
+  COMMENT = 'Orchestrates the collection of Dynamic Table metadata and refresh history.'
+  LOG_LEVEL = 'INFO' -- Or 'DEBUG' for troubleshooting
+AS
+CALL YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
+    P_ASYNC_BATCH_SIZE => 50, -- Your chosen batch size
+    P_TIMEZONE_NAME => 'America/Los_Angeles' -- Pass the timezone to the SP for consistency
+);
+
+-- After creation, remember to resume the task:
+ALTER TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK RESUME;
