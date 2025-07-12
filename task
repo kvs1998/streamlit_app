@@ -80,63 +80,32 @@ ALTER TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK RESUME;
 
 
 
-import pandas as pd
-# Assuming get_snowflake_session() is defined elsewhere and works
-# from snowflake.snowpark import Session # if using Snowpark for session
-# from snowflake.connector import connect # if using Connector for session
-# ... your session creation logic
-
-@st.cache_data(ttl=(12*60*60)) # Cache for 12 hours
-def fetch_driver_execution_history():
-    """
-    Fetches execution history of the main driver procedure from the custom audit log table.
-    """
-    session = get_snowflake_session() # Get your Snowpark session or Connector session
-
-    # Adjust table FQDN for your audit log table
-    AUDIT_LOG_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG"
-
-    # Query the custom audit log table
-    # You can select specific columns, or parse the AUDIT_JSON column for more details
-    # We'll select key columns for the summary, similar to original QUERY_HISTORY.
-    # We remove QUERY_ID since it's not directly in this audit table's columns (unless you want to embed it).
-    
-    query = f"""
     SELECT
-        DRIVER_RUN_UUID AS QUERY_ID, -- Map audit_log_id to QUERY_ID for consistency with old df structure
-        RUN_STATUS AS EXECUTION_STATUS,
-        RUN_START_TIME AS START_TIME,
-        RUN_END_TIME AS END_TIME,
-        TOTAL_DURATION_SEC AS TOTAL_ELAPSED_TIME_SECONDS,
-        AUDIT_JSON -- Keep the full JSON if you want to drill down further in Python
+        main.DRIVER_RUN_UUID,
+        main.RUN_STATUS AS DRIVER_EXECUTION_STATUS, -- Status of the main driver run
+        main.RUN_START_TIME,
+        main.RUN_END_TIME,
+        main.TOTAL_DURATION_SEC,
+        
+        -- Details from the flattened job_audit_details array
+        job_audit.value:qualified_name::VARCHAR AS QUALIFIED_NAME,
+        job_audit.value:overall_table_status::VARCHAR AS OVERALL_TABLE_STATUS_FOR_DT,
+        
+        -- Extract specific job_type statuses and messages
+        GET(GET(job_audit.value:job_details, 'REFRESH_HISTORY'), 'status')::VARCHAR AS REFRESH_HISTORY_STATUS,
+        GET(GET(job_audit.value:job_details, 'REFRESH_HISTORY'), 'message')::VARCHAR AS REFRESH_HISTORY_MESSAGE, -- Will be NULL if SUCCESS
+        
+        GET(GET(job_audit.value:job_details, 'METADATA_SNAPSHOT'), 'status')::VARCHAR AS METADATA_SNAPSHOT_STATUS,
+        GET(GET(job_audit.value:job_details, 'METADATA_SNAPSHOT'), 'message')::VARCHAR AS METADATA_SNAPSHOT_MESSAGE, -- Will be NULL if SUCCESS
+        
+        -- You can add more columns from AUDIT_JSON as needed, e.g., phase_durations_sec etc.
+        -- main.AUDIT_JSON -- Keep the full JSON if you want to drill down further in Python
     FROM
-        {AUDIT_LOG_TABLE_FQDN}
+        {AUDIT_LOG_TABLE_FQDN} AS main,
+        LATERAL FLATTEN(input => main.AUDIT_JSON:job_audit_details) AS job_audit -- Flatten the array of job_audit_details
     WHERE
-        RUN_START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP()) -- Last 30 days
-    ORDER BY START_TIME DESC
-    """
-    
-    # Using session.sql for Snowpark
-    driver_hist_df_snowpark = session.sql(query).to_pandas()
+        main.RUN_START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP()) -- Last 30 days
+    ORDER BY
+        main.RUN_START_TIME DESC,
+        QUALIFIED_NAME ASC -- Order by table name for consistency
 
-    if not driver_hist_df_snowpark.empty:
-        # Convert timestamps if not already pandas datetime (Snowpark often does this automatically)
-        driver_hist_df_snowpark['START_TIME'] = pd.to_datetime(driver_hist_df_snowpark['START_TIME'])
-        driver_hist_df_snowpark['END_TIME'] = pd.to_datetime(driver_hist_df_snowpark['END_TIME'])
-    
-    return driver_hist_df_snowpark # Return the full df, or modified df
-
-# --- How you might use job_audit_details from AUDIT_JSON (example for context) ---
-# If you load the AUDIT_JSON column into your Python DataFrame:
-# from your driver_hist_df_snowpark, you would have a column 'AUDIT_JSON'
-# example_audit_json = driver_hist_df_snowpark.iloc[0]['AUDIT_JSON'] # Get one JSON object
-# job_audit_details = example_audit_json.get('job_audit_details', [])
-# for table_audit in job_audit_details:
-#     qualified_name = table_audit.get('qualified_name')
-#     overall_status = table_audit.get('overall_table_status')
-#     job_details = table_audit.get('job_details')
-#     print(f"Table: {qualified_name}, Overall Status: {overall_status}")
-#     for job_type, details in job_details.items():
-#         status = details.get('status')
-#         message = details.get('message', 'N/A') # Message only exists for failed ones
-#         print(f"  - Job Type: {job_type}, Status: {status}, Message: {message}")
