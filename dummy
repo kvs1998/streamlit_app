@@ -1,9 +1,10 @@
 -- Main Driver Stored Procedure - Orchestrates collection for all tracked tables
--- REVISED to rely entirely on P_TRACKING_STAGING_TABLE_FQDN for audit and failure detection
+-- REVISED: Corrected handling of default procedure parameters
 -- Replace YOUR_DB and YOUR_SCHEMA.
 
 CREATE OR REPLACE PROCEDURE YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
-    P_ASYNC_BATCH_SIZE NUMBER -- Parameter for controlling ASYNC concurrency
+    P_ASYNC_BATCH_SIZE NUMBER DEFAULT 50, -- Set default value directly here
+    P_TIMEZONE_NAME VARCHAR DEFAULT 'America/Los_Angeles' -- NEW: Timezone parameter with default
 )
 RETURNS VARIANT -- Returns JSON object for structured audit
 LANGUAGE SQL
@@ -21,9 +22,9 @@ DECLARE
     -- --- Internal Variables ---
     lv_message VARCHAR DEFAULT '';
     lv_total_tables_found INTEGER DEFAULT 0;
-    lv_jobs_launched_count INTEGER DEFAULT 0; -- Count of ASYNC calls submitted
-    lv_overall_success_count INTEGER DEFAULT 0; -- Based on tracking table at end
-    lv_overall_fail_count INTEGER DEFAULT 0;    -- Based on tracking table at end
+    lv_jobs_launched_count INTEGER DEFAULT 0;
+    lv_overall_success_count INTEGER DEFAULT 0;
+    lv_overall_fail_count INTEGER DEFAULT 0;
     lv_db_name VARCHAR;
     lv_schema_name VARCHAR;
     lv_table_name VARCHAR;
@@ -76,6 +77,9 @@ DECLARE
         WHERE IS_ACTIVE = TRUE;
 
 BEGIN
+    -- Set the session timezone based on the procedure parameter
+    ALTER SESSION SET TIMEZONE = :P_TIMEZONE_NAME;
+
     lv_driver_run_start_time := CURRENT_TIMESTAMP();
     lv_message := lv_message || 'Starting DYNAMIC TABLE COLLECTION DRIVER (UUID: ' || lv_driver_run_uuid || ') at ' || lv_driver_run_start_time || '\n';
     lv_driver_overall_status := 'FAILED_OVERALL';
@@ -229,7 +233,6 @@ BEGIN
     lv_message := lv_message || 'All ASYNC jobs completion process finalized. Checking overall status...\n';
 
     -- --- STEP: Consolidate ASYNC Job Statuses from TRACKING STAGING TABLE ---
-    -- This provides the definitive audit trail for this driver run, as reported by children.
     lv_message := lv_message || 'Consolidating ASYNC job statuses from tracking staging table...\n';
     
     DECLARE
@@ -241,7 +244,7 @@ BEGIN
         
         job_status VARCHAR;
         job_message VARCHAR;
-        table_job_details_map OBJECT DEFAULT OBJECT_CONSTRUCT(); -- Intermediate map to build JSON per qualified_name
+        table_job_details_map OBJECT DEFAULT OBJECT_CONSTRUCT();
         table_overall_status VARCHAR;
     BEGIN
         FOR tracking_record IN c_tracking_results DO
@@ -255,16 +258,15 @@ BEGIN
                 lv_message := lv_message || '  JOB STATUS: ' || tracking_record.QUALIFIED_NAME || ' (' || tracking_record.JOB_TYPE || ') -> SUCCESS: ' || job_message || '\n';
             END IF;
 
-            -- Build the nested job_details object for each qualified_name
+            -- Build the nested job_details object for each qualified_name (for return JSON)
             DECLARE
-                current_job_details OBJECT DEFAULT GET(table_job_details_map, tracking_record.QUALIFIED_NAME);
+                local_table_job_details_map OBJECT := :table_job_details_map;
+                current_job_details OBJECT DEFAULT GET(local_table_job_details_map, tracking_record.QUALIFIED_NAME);
             BEGIN
                 IF (current_job_details IS NULL) THEN
                     current_job_details := OBJECT_CONSTRUCT();
                 END IF;
 
-                -- Insert (or update) the job type's status
-                -- NEW: Conditionally include 'message' only for non-SUCCESS statuses
                 current_job_details := OBJECT_INSERT(
                     current_job_details,
                     tracking_record.JOB_TYPE,
@@ -274,21 +276,19 @@ BEGIN
                     TRUE -- Overwrite if key exists
                 );
 
-                table_job_details_map := OBJECT_INSERT(table_job_details_map, tracking_record.QUALIFIED_NAME, current_job_details, TRUE);
+                table_job_details_map := OBJECT_INSERT(local_table_job_details_map, tracking_record.QUALIFIED_NAME, current_job_details, TRUE);
             END;
         END FOR;
 
         -- Now, iterate through the consolidated map to build the final lv_job_audit_details array
-        FOR qualified_name_key IN (SELECT KEY FROM TABLE(FLATTEN(input => table_job_details_map))) DO
+        FOR qualified_name_key IN (SELECT KEY FROM TABLE(FLATTEN(input => :table_job_details_map))) DO
             DECLARE
                 q_name VARCHAR := qualified_name_key.KEY;
-                job_details OBJECT := GET(table_job_details_map, q_name);
+                job_details OBJECT := GET(:table_job_details_map, q_name);
                 
                 refresh_history_status VARCHAR := GET(GET(job_details, 'REFRESH_HISTORY'), 'status');
                 metadata_snapshot_status VARCHAR := GET(GET(job_details, 'METADATA_SNAPSHOT'), 'status');
             BEGIN
-                -- Determine overall_table_status for each table
-                -- Logic: If any critical failure, overall FAILED. If some success, some untracked, PARTIAL. Else SUCCESS.
                 IF (refresh_history_status = 'FAILED_SUBMISSION' OR refresh_history_status = 'FAILED_EXECUTION' OR refresh_history_status = 'FAILED_INPUT' OR
                     metadata_snapshot_status = 'FAILED_SUBMISSION' OR metadata_snapshot_status = 'FAILED_EXECUTION' OR metadata_snapshot_status = 'FAILED_INPUT') THEN
                     table_overall_status := 'FAILED';
@@ -296,20 +296,18 @@ BEGIN
                     (refresh_history_status = 'SUCCESS' OR refresh_history_status IS NULL) AND
                     (metadata_snapshot_status = 'SUCCESS' OR metadata_snapshot_status IS NULL)
                 ) THEN
-                    -- If all *tracked* jobs succeeded, but not necessarily all possible jobs ran.
-                    -- If both are SUCCESS, it's SUCCESS. If one is SUCCESS and other NULL, it's PARTIAL.
                     IF (refresh_history_status = 'SUCCESS' AND metadata_snapshot_status = 'SUCCESS') THEN
                         table_overall_status := 'SUCCESS';
                     ELSE
                         table_overall_status := 'PARTIAL_SUCCESS';
                     END IF;
-                ELSE -- Mixed results or unexpected statuses
-                    table_overall_status := 'MIXED_STATUS'; -- Or fall through to FAILED if no other category
+                ELSE
+                    table_overall_status := 'MIXED_STATUS';
                 END IF;
 
                 lv_job_audit_details := ARRAY_APPEND(:lv_job_audit_details, OBJECT_CONSTRUCT(
                     'qualified_name', q_name,
-                    'job_details', job_details, -- Contains status and conditional message for each job type
+                    'job_details', job_details,
                     'overall_table_status', table_overall_status
                 ));
             END;
@@ -520,11 +518,12 @@ BEGIN
         'driver_run_uuid', lv_driver_run_uuid,
         'start_time', lv_driver_run_start_time,
         'end_time', lv_final_overall_end_time,
+        'timezone', :P_TIMEZONE_NAME, -- Include timezone parameter's value
         'total_tables_found', lv_total_tables_found,
         'total_jobs_launched', lv_jobs_launched_count,
         'total_async_jobs_succeeded', lv_overall_success_count,
         'total_async_jobs_failed', lv_overall_fail_count,
-        'job_audit_details', lv_job_audit_details, -- Already populated with condensed details
+        'job_audit_details', lv_job_audit_details,
         'phase_durations_sec', OBJECT_CONSTRUCT(
             'async_launch_duration_sec', NVL(DATEDIFF('millisecond', lv_async_launch_start_time, lv_async_launch_end_time), 0) / 1000,
             'async_await_duration_sec', NVL(DATEDIFF('millisecond', lv_async_await_start_time, lv_async_await_end_time), 0) / 1000,
@@ -544,6 +543,7 @@ EXCEPTION
             'driver_run_uuid', lv_driver_run_uuid,
             'start_time', lv_driver_run_start_time,
             'end_time', lv_final_overall_end_time,
+            'timezone', :P_TIMEZONE_NAME, -- Include timezone parameter's value in exception return
             'total_tables_found', NVL(lv_total_tables_found, 0),
             'total_jobs_launched', NVL(lv_jobs_launched_count, 0),
             'total_async_jobs_succeeded', 0,
