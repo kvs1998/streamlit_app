@@ -17,55 +17,65 @@ ALTER TABLE YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG CLUSTER BY (RUN_START_
 
 
 
-
 -- Replace placeholders YOUR_DB, YOUR_SCHEMA, YOUR_WAREHOUSE
--- And adjust schedule, batch size as needed.
+-- Adjust schedule, batch size as needed.
 
 CREATE OR REPLACE TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK
   WAREHOUSE = YOUR_WAREHOUSE_NAME
-  SCHEDULE = 'USING CRON 0 3 * * * America/Los_Angeles' -- Example: Daily at 3:00 AM PST
+  SCHEDULE = 'USING CRON 0 3 * * * America/Los_Angeles'
   ALLOW_OVERLAPPING_EXECUTION = FALSE
-  USER_TASK_TIMEOUT_MS = 14400000 -- Example: 4 hours (4 * 3600 * 1000 ms)
-  SUSPEND_TASK_AFTER_NUM_FAILURES = 3 -- Suspend if 3 consecutive runs fail
+  USER_TASK_TIMEOUT_MS = 14400000
+  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
   COMMENT = 'Orchestrates the collection of Dynamic Table metadata and refresh history and logs audit to T_DT_COLLECTION_AUDIT_LOG.'
   LOG_LEVEL = 'INFO'
 AS
-INSERT INTO YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG (
-    DRIVER_RUN_UUID,
-    RUN_STATUS,
-    RUN_START_TIME,
-    RUN_END_TIME,
-    TOTAL_DURATION_SEC,
-    TOTAL_TABLES_FOUND,
-    TOTAL_JOBS_LAUNCHED,
-    TOTAL_ASYNC_JOBS_SUCCEEDED,
-    TOTAL_ASYNC_JOBS_FAILED,
-    AUDIT_JSON
-)
-SELECT
-    audit_json:driver_run_uuid::VARCHAR,
-    audit_json:status::VARCHAR,
-    audit_json:start_time::TIMESTAMP_LTZ,
-    audit_json:end_time::TIMESTAMP_LTZ,
-    audit_json:total_run_duration_sec::NUMBER(10,3),
-    audit_json:total_tables_found::INTEGER,
-    audit_json:total_jobs_launched::INTEGER,
-    audit_json:total_async_jobs_succeeded::INTEGER,
-    audit_json:total_async_jobs_failed::INTEGER,
-    audit_json -- Store the entire JSON object for full detail
-FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())) -- Get the result of the immediately preceding CALL
-QUALIFY ROW_NUMBER() OVER (ORDER BY 1) = 1 -- Ensure only one row if RESULT_SCAN has multiple (e.g. from subqueries)
-, ( -- Alias the result of the CALL for easy access
-    CALL YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
-        P_ASYNC_BATCH_SIZE => 50,
-        P_TIMEZONE_NAME => 'America/Los_Angeles'
-    )
-) AS audit_json; -- Call the SP and alias its single JSON return value
+$$
+    -- Snowflake Scripting block within the task
+    DECLARE
+        sp_result VARIANT; -- Declare a variable to hold the JSON output
+    BEGIN
+        -- Call your main driver stored procedure
+        sp_result := CALL YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
+            P_ASYNC_BATCH_SIZE => 50, -- Your chosen batch size
+            P_TIMEZONE_NAME => 'America/Los_Angeles' -- Pass the timezone to the SP
+        );
+
+        -- Insert the parsed components of the JSON output into your audit table
+        INSERT INTO YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG (
+            DRIVER_RUN_UUID,
+            RUN_STATUS,
+            RUN_START_TIME,
+            RUN_END_TIME,
+            TOTAL_DURATION_SEC,
+            TOTAL_TABLES_FOUND,
+            TOTAL_JOBS_LAUNCHED,
+            TOTAL_ASYNC_JOBS_SUCCEEDED,
+            TOTAL_ASYNC_JOBS_FAILED,
+            AUDIT_JSON
+        )
+        SELECT
+            sp_result:driver_run_uuid::VARCHAR,
+            sp_result:status::VARCHAR,
+            sp_result:start_time::TIMESTAMP_LTZ,
+            sp_result:end_time::TIMESTAMP_LTZ,
+            sp_result:total_run_duration_sec::NUMBER(10,3),
+            sp_result:total_tables_found::INTEGER,
+            sp_result:total_jobs_launched::INTEGER,
+            sp_result:total_async_jobs_succeeded::INTEGER,
+            sp_result:total_async_jobs_failed::INTEGER,
+            sp_result -- Store the entire JSON object for full detail
+        ;
+        
+        -- Optional: Add auditing for task success/failure based on sp_result:status
+        -- e.g., if sp_result:status is 'FAILED_OVERALL', you could log to a separate simple error table
+        -- or trigger an alert using an ERROR_INTEGRATION on the task.
+        
+        -- Tasks implicitly commit DMLs by default. If the insert fails, the task will fail.
+    END;
+$$;
 
 -- After creation, remember to resume the task:
 ALTER TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK RESUME;
-
-
 
 
 
