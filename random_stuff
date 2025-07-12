@@ -1,0 +1,11 @@
+# Current UTC time (also naive datetime)
+now_utc = datetime.datetime.utcnow()
+
+# 3 days ago from now
+threshold = now_utc - datetime.timedelta(days=3)
+
+# Find rows that are NULL or older than 3 days
+condition = (df['LATEST_DATA_TIMESTAMP'].isna()) | (df['LATEST_DATA_TIMESTAMP'] < threshold)
+
+# Count them
+count = condition.sum()
