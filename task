@@ -1,3 +1,15 @@
+def paginate_dataframe(dataframe, page_size, page_num):
+
+    page_size = page_size
+
+    if page_size is None:
+
+        return None
+
+    offset = page_size*(page_num-1)
+
+    return dataframe[offset:offset + page_size]
+
 CREATE OR REPLACE TABLE YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG (
     DRIVER_RUN_UUID VARCHAR PRIMARY KEY,
     RUN_STATUS VARCHAR, -- 'SUCCESS', 'FAILED_OVERALL', 'CRITICAL_FAILURE'
