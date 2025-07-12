@@ -1,0 +1,334 @@
+# tabs/dt_health_tab.py
+import streamlit as st
+import pandas as pd
+import altair as alt # For charting
+from datetime import datetime, timedelta
+
+# Assuming get_snowflake_session() is available from a utils file or defined here
+# from utils.snowflake_utils import get_snowflake_session 
+
+# --- Helper functions (re-using and adapting from previous code) ---
+def format_seconds_to_readable(seconds_series, format_type):
+    # This helper expects a pandas Series, but can handle single values from pd.Series([value])
+    if not isinstance(seconds_series, pd.Series):
+        seconds_series = pd.Series([seconds_series])
+
+    numeric_series = pd.to_numeric(seconds_series, errors='coerce')
+
+    if numeric_series.empty or pd.isna(numeric_series).all():
+        # If all are NaN or empty, return Series of "N/A"
+        return pd.Series(["N/A"] * len(numeric_series), index=numeric_series.index)
+
+    def format_single_second(s, f_type):
+        if pd.isna(s):
+            return "N/A"
+        
+        s = float(s) # Ensure float conversion
+        if s == 0: return "0s"
+
+        if f_type == "seconds":
+            return f"{s:.1f}s"
+        elif f_type == "minutes":
+            return f"{(s / 60):.1f}m"
+        elif f_type == "hours":
+            return f"{(s / 3600):.1f}h"
+        elif f_type == "days":
+            return f"{(s / 86400):.1f}d"
+        elif f_type == "mixed":
+            days = int(s // 86400)
+            s_remaining = s % 86400
+            hours = int(s_remaining // 3600)
+            s_remaining = s_remaining % 3600
+            minutes = int(s_remaining // 60)
+            seconds = s_remaining % 60
+            
+            parts = []
+            if days > 0: parts.append(f"{days}d")
+            if hours > 0: parts.append(f"{hours}h")
+            if minutes > 0: parts.append(f"{minutes}m")
+            if seconds > 0.1 and (not parts or seconds >= 1):
+                parts.append(f"{seconds:.1f}s")
+            
+            return " ".join(parts) if parts else "0s"
+        return str(s) # Fallback
+
+    return numeric_series.apply(lambda x: format_single_second(x, f_type=format_type))
+
+# --- Data Fetching Functions ---
+
+# @st.cache_data for high-level driver audit logs
+@st.cache_data(ttl=(12*60*60)) # Cache for 12 hours
+def fetch_driver_execution_history_summary():
+    """
+    Fetches high-level execution history summaries of the main driver procedure
+    from the custom audit log table (T_DT_COLLECTION_AUDIT_LOG).
+    This function focuses on overall driver run status and metrics for KPIs and trend charts.
+    """
+    session = st.session_state.get_snowflake_session() # Assuming session is managed in session_state
+
+    AUDIT_LOG_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG" # Replace with your FQDN
+
+    query = f"""
+    SELECT
+        DRIVER_RUN_UUID,
+        RUN_STATUS,
+        RUN_START_TIME,
+        RUN_END_TIME,
+        TOTAL_DURATION_SEC,
+        TOTAL_TABLES_FOUND,
+        TOTAL_JOBS_LAUNCHED,
+        TOTAL_ASYNC_JOBS_SUCCEEDED,
+        TOTAL_ASYNC_JOBS_FAILED,
+        MESSAGE AS RUN_MESSAGE,
+        TIMEZONE
+    FROM
+        {AUDIT_LOG_TABLE_FQDN}
+    WHERE
+        RUN_START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP())
+    ORDER BY RUN_START_TIME DESC
+    """
+    
+    df = session.sql(query).to_pandas()
+
+    if not df.empty:
+        df['RUN_START_TIME'] = pd.to_datetime(df['RUN_START_TIME'])
+        df['RUN_END_TIME'] = pd.to_datetime(df['RUN_END_TIME'])
+    
+    return df
+
+# @st.cache_data for current detailed tracking data
+@st.cache_data(ttl=(5*60)) # Cache for 5 minutes for current data freshness
+def fetch_dt_tracking_data():
+    """
+    Fetches the current detailed tracking status for all dynamic tables
+    from T_DYNAMIC_TABLE_TRACKING.
+    """
+    session = st.session_state.get_snowflake_session()
+
+    TRACKING_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_TRACKING" # Replace with your FQDN
+
+    query = f"""
+    SELECT
+        QUALIFIED_NAME,
+        IS_ACTIVE,
+        TRACK_REFRESH_HISTORY,
+        LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP,
+        LAST_REFRESH_HISTORY_COLLECTION_STATUS,
+        LAST_REFRESH_HISTORY_COLLECTION_MESSAGE, -- Keep for now if dashboard uses it
+        TRACK_METADATA_SNAPSHOT,
+        LAST_METADATA_COLLECTION_TIMESTAMP,
+        LAST_METADATA_COLLECTION_STATUS,
+        LAST_METADATA_COLLECTION_MESSAGE, -- Keep for now if dashboard uses it
+        UPDATED_AT
+    FROM
+        {TRACKING_TABLE_FQDN}
+    ORDER BY
+        QUALIFIED_NAME
+    """
+    
+    df = session.sql(query).to_pandas()
+
+    if not df.empty:
+        # Ensure timestamp columns are datetime objects for proper handling
+        df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'] = pd.to_datetime(df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'])
+        df['LAST_METADATA_COLLECTION_TIMESTAMP'] = pd.to_datetime(df['LAST_METADATA_COLLECTION_TIMESTAMP'])
+        df['UPDATED_AT'] = pd.to_datetime(df['UPDATED_AT'])
+    
+    return df
+
+
+# --- Main Render Function for the DT Health Tab ---
+def render_dt_health_tab():
+    st.header("Dynamic Table Health Dashboard")
+    st.write("Overview of driver execution, collection status, and detailed table health.")
+
+    # --- 1. Fetch Data ---
+    # Fetch audit history for KPIs and trends
+    driver_history_df = fetch_driver_execution_history_summary()
+    # Fetch current tracking data for detailed table status and distribution charts
+    tracking_data_df = fetch_dt_tracking_data()
+
+    if driver_history_df.empty and tracking_data_df.empty:
+        st.info("No data available to display the dashboard. Please check data sources.", icon="ℹ️")
+        return
+
+    # --- 2. Overall Driver Health KPIs ---
+    st.subheader("Overall Driver Health KPIs")
+    kpi_cols = st.columns(4)
+
+    latest_run = driver_history_df.iloc[0] if not driver_history_df.empty else None
+    
+    total_tables_tracked = tracking_data_df['QUALIFIED_NAME'].nunique() if not tracking_data_df.empty else 0
+    active_rh_tracking = tracking_data_df[tracking_data_df['TRACK_REFRESH_HISTORY'] == True].shape[0] if not tracking_data_df.empty else 0
+    active_metadata_tracking = tracking_data_df[tracking_data_df['TRACK_METADATA_SNAPSHOT'] == True].shape[0] if not tracking_data_df.empty else 0
+
+    with kpi_cols[0]:
+        st.metric("Total Tables Tracked", total_tables_tracked)
+        st.metric("Active (RH) Tracking", active_rh_tracking)
+    with kpi_cols[1]:
+        st.metric("Active (Metadata) Tracking", active_metadata_tracking)
+        st.empty() # Placeholder for alignment, matches screenshot
+    with kpi_cols[2]:
+        if latest_run is not None:
+            st.metric("Last Driver Run Time", latest_run['RUN_START_TIME'].strftime('%Y-%m-%d %H:%M:%S'))
+        else:
+            st.metric("Last Driver Run Time", "N/A")
+        st.empty() # Placeholder
+    with kpi_cols[3]:
+        if latest_run is not None:
+            duration_formatted = format_seconds_to_readable(
+                pd.Series([latest_run['TOTAL_DURATION_SEC']]), "mixed"
+            ).iloc[0]
+            st.metric("Last Run Duration", duration_formatted)
+        else:
+            st.metric("Last Run Duration", "N/A")
+        st.empty() # Placeholder
+
+    st.markdown("---")
+
+    # --- 3. Driver Execution Time Trend Chart and Collection Status Distribution ---
+    st.subheader("Driver Execution Time Trend")
+    chart_cols = st.columns([0.6, 0.4])
+
+    with chart_cols[0]:
+        st.write("Historical execution times of the main collection driver program.")
+        if not driver_history_df.empty:
+            driver_history_chart_data = driver_history_df[['RUN_START_TIME', 'TOTAL_DURATION_SEC']].copy()
+            driver_history_chart_data.columns = ['Run Time', 'Duration (seconds)'] # Rename for chart
+
+            # Line chart
+            chart = alt.Chart(driver_history_chart_data).mark_line(point=True).encode(
+                x=alt.X('Run Time', type='temporal'),
+                y=alt.Y('Duration (seconds)', type='quantitative', scale=alt.Scale(type='linear')), # Default to linear
+                tooltip=[
+                    alt.Tooltip('Run Time', format="%Y-%m-%d %H:%M:%S"),
+                    alt.Tooltip('Duration (seconds)', format=".1f")
+                ]
+            ).properties(
+                title='Driver Program Execution Duration Over Time'
+            ).interactive()
+            
+            # Checkbox for log scale
+            log_scale_y = st.checkbox("Log Scale Y-axis (Driver Trend)", value=False, key="log_scale_driver_trend")
+            if log_scale_y:
+                chart = chart.encode(y=alt.Y('Duration (seconds)', type='quantitative', scale=alt.Scale(type='log')))
+            
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("No historical driver execution data for trend chart.", icon="ℹ️")
+
+    with chart_cols[1]:
+        st.subheader("Collection Status Distribution")
+        st.write("Breakdown of tables by their last collection status for each type.")
+        if not tracking_data_df.empty:
+            # Aggregate success/fail counts from tracking_data_df
+            rh_status_counts = tracking_data_df.groupby('LAST_REFRESH_HISTORY_COLLECTION_STATUS').size().reset_index(name='count')
+            rh_status_counts.columns = ['Status', 'Count']
+            rh_status_counts['Collection Type'] = 'Refresh History'
+
+            md_status_counts = tracking_data_df.groupby('LAST_METADATA_COLLECTION_STATUS').size().reset_index(name='count')
+            md_status_counts.columns = ['Status', 'Count']
+            md_status_counts['Collection Type'] = 'Metadata Snapshot'
+
+            combined_status_counts = pd.concat([rh_status_counts, md_status_counts])
+
+            # Ensure all statuses are present for consistent coloring if needed, otherwise Altair handles this.
+            # Define specific colors if desired for SUCCESS/FAILED/etc.
+            status_color_map = {
+                'SUCCESS': 'green',
+                'FAILED': 'red',
+                'FAILED_EXECUTION': 'red',
+                'FAILED_INPUT': 'red',
+                'FAILED_SUBMISSION': 'red',
+                'UNKNOWN': 'gray',
+                # Add other statuses as defined in your SP or actual data
+            }
+
+            bar_chart = alt.Chart(combined_status_counts).mark_bar().encode(
+                x=alt.X('Count:Q', axis=alt.Axis(title='Number of Tables')),
+                y=alt.Y('Collection Type:N', axis=alt.Axis(title='Collection Type')),
+                color=alt.Color('Status:N', scale=alt.Scale(range=list(status_color_map.values()))), # Apply color based on status
+                tooltip=['Collection Type', 'Status', 'Count']
+            ).properties(
+                title='Last Collection Status by Type'
+            ).interactive()
+            st.altair_chart(bar_chart, use_container_width=True)
+        else:
+            st.info("No detailed tracking data for status distribution.", icon="ℹ️")
+    
+    st.markdown("---")
+
+    # --- 4. Detailed Collection Status per Table ---
+    st.subheader("Detailed Collection Status per Table")
+    st.write("View the last collection attempt status and messages for each dynamic table being tracked.")
+
+    if tracking_data_df.empty:
+        st.info("No detailed collection status per table available.", icon="ℹ️")
+        return
+
+    # --- Filters for the Detailed Table ---
+    filter_cols = st.columns(2)
+
+    all_rh_statuses = ['All'] + sorted(tracking_data_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'].unique().tolist())
+    selected_rh_status = filter_cols[0].selectbox("Filter by Refresh History Status:", options=all_rh_statuses)
+
+    all_md_statuses = ['All'] + sorted(tracking_data_df['LAST_METADATA_COLLECTION_STATUS'].unique().tolist())
+    selected_md_status = filter_cols[1].selectbox("Filter by Metadata Snapshot Status:", options=all_md_statuses)
+
+    filtered_df = tracking_data_df.copy()
+
+    if selected_rh_status != 'All':
+        filtered_df = filtered_df[filtered_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'] == selected_rh_status]
+    if selected_md_status != 'All':
+        filtered_df = filtered_df[filtered_df['LAST_METADATA_COLLECTION_STATUS'] == selected_md_status]
+
+    if filtered_df.empty:
+        st.info("No tables match the selected filters.", icon="ℹ️")
+        return
+
+    # --- Display Detailed Table ---
+    display_df = filtered_df.copy()
+
+    # Reformat timestamps for display
+    display_df['LAST_RH_COLLECT_TIME'] = display_df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    display_df['LAST_MD_COLLECT_TIME'] = display_df['LAST_METADATA_COLLECTION_TIMESTAMP'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    display_df['TRACKING_RECORD_LAST_UPDATED'] = display_df['UPDATED_AT'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Drop message columns if they are to be excluded from display, as per your question
+    # IMPORTANT: ONLY REMOVE IF YOU ARE SURE THEY ARE NOT NEEDED IN THE TABLE DISPLAY
+    display_df = display_df.drop(columns=[
+        'LAST_REFRESH_HISTORY_COLLECTION_MESSAGE', 
+        'LAST_METADATA_COLLECTION_MESSAGE'
+    ], errors='ignore') # errors='ignore' prevents error if column already dropped or doesn't exist
+
+    # Rename columns for presentation
+    display_df = display_df.rename(columns={
+        'QUALIFIED_NAME': 'Dynamic Table',
+        'IS_ACTIVE': 'Active?',
+        'TRACK_REFRESH_HISTORY': 'Track RH?',
+        'LAST_REFRESH_HISTORY_COLLECTION_STATUS': 'Last RH Status',
+        'TRACK_METADATA_SNAPSHOT': 'Track Metadata?',
+        'LAST_METADATA_COLLECTION_STATUS': 'Last Metadata Status',
+        'LAST_RH_COLLECT_TIME': 'Last RH Collect Time',
+        'LAST_MD_COLLECT_TIME': 'Last Metadata Collect Time',
+    })
+
+    # Select and reorder columns for final display as seen in screenshot
+    final_cols_order = [
+        'Dynamic Table',
+        'Active?',
+        'Track RH?',
+        'Last RH Collect Time',
+        'Last RH Status',
+        # 'Last RH Message', # Removed
+        'Track Metadata?',
+        'Last Metadata Collect Time',
+        'Last Metadata Status',
+        # 'Last Metadata Message', # Removed
+        'Tracking Record Last Updated'
+    ]
+
+    # Ensure all selected columns exist before passing to Streamlit
+    final_display_df = display_df[[col for col in final_cols_order if col in display_df.columns]]
+
+    st.dataframe(final_display_df, use_container_width=True)
