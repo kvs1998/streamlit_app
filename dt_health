@@ -1,0 +1,327 @@
+# tabs/dt_health_tab.py
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+from datetime import datetime, timedelta
+
+# --- Helper functions (from previous code) ---
+def format_seconds_to_readable(seconds_series, format_type):
+    if not isinstance(seconds_series, pd.Series):
+        seconds_series = pd.Series([seconds_series])
+    numeric_series = pd.to_numeric(seconds_series, errors='coerce')
+    if numeric_series.empty or pd.isna(numeric_series).all():
+        return pd.Series(["N/A"] * len(numeric_series), index=numeric_series.index)
+    def format_single_second(s, f_type):
+        if pd.isna(s): return "N/A"
+        s = float(s)
+        if s == 0: return "0s"
+        if f_type == "seconds": return f"{s:.1f}s"
+        elif f_type == "minutes": return f"{(s / 60):.1f}m"
+        elif f_type == "hours": return f"{(s / 3600):.1f}h"
+        elif f_type == "days": return f"{(s / 86400):.1f}d"
+        elif f_type == "mixed":
+            days = int(s // 86400); s_remaining = s % 86400
+            hours = int(s_remaining // 3600); s_remaining = s_remaining % 3600
+            minutes = int(s_remaining // 60); seconds = s_remaining % 60
+            parts = []
+            if days > 0: parts.append(f"{days}d")
+            if hours > 0: parts.append(f"{hours}h")
+            if minutes > 0: parts.append(f"{minutes}m")
+            if seconds > 0.1 and (not parts or seconds >= 1): parts.append(f"{seconds:.1f}s")
+            return " ".join(parts) if parts else "0s"
+        return str(s)
+    return numeric_series.apply(lambda x: format_single_second(x, f_type=format_type))
+
+# --- Data Fetching Functions ---
+
+@st.cache_data(ttl=(12*60*60))
+def fetch_driver_execution_history_summary():
+    session = st.session_state.get_snowflake_session()
+    AUDIT_LOG_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG"
+    query = f"""
+    SELECT
+        DRIVER_RUN_UUID, RUN_STATUS, RUN_START_TIME, RUN_END_TIME,
+        TOTAL_DURATION_SEC, TOTAL_TABLES_FOUND, TOTAL_JOBS_LAUNCHED,
+        TOTAL_ASYNC_JOBS_SUCCEEDED, TOTAL_ASYNC_JOBS_FAILED,
+        MESSAGE AS RUN_MESSAGE, TIMEZONE
+    FROM {AUDIT_LOG_TABLE_FQDN}
+    WHERE RUN_START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP())
+    ORDER BY RUN_START_TIME DESC
+    """
+    df = session.sql(query).to_pandas()
+    if not df.empty:
+        df['RUN_START_TIME'] = pd.to_datetime(df['RUN_START_TIME'])
+        df['RUN_END_TIME'] = pd.to_datetime(df['RUN_END_TIME'])
+    return df
+
+@st.cache_data(ttl=(5*60))
+def fetch_dt_tracking_data():
+    session = st.session_state.get_snowflake_session()
+    TRACKING_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_TRACKING"
+    METADATA_SNAPSHOT_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_METADATA_LATEST_SNAPSHOT"
+
+    query = f"""
+    SELECT
+        t.QUALIFIED_NAME,
+        t.DATABASE_NAME,
+        t.SCHEMA_NAME,
+        t.TABLE_NAME,
+        t.IS_ACTIVE,
+        t.TRACK_REFRESH_HISTORY,
+        t.LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP,
+        t.LAST_REFRESH_HISTORY_COLLECTION_STATUS,
+        t.LAST_REFRESH_HISTORY_COLLECTION_MESSAGE,
+        t.TRACK_METADATA_SNAPSHOT,
+        t.LAST_METADATA_COLLECTION_TIMESTAMP,
+        t.LAST_METADATA_COLLECTION_STATUS,
+        t.LAST_METADATA_COLLECTION_MESSAGE,
+        ms.LATEST_DATA_TIMESTAMP,
+        ms.MEAN_LAG_SEC,
+        ms.MAXIMUM_LAG_SEC,
+        t.UPDATED_AT
+    FROM
+        {TRACKING_TABLE_FQDN} AS t
+    LEFT JOIN
+        {METADATA_SNAPSHOT_TABLE_FQDN} AS ms
+    ON
+        t.QUALIFIED_NAME = ms.QUALIFIED_NAME
+    ORDER BY
+        t.QUALIFIED_NAME
+    """
+    df = session.sql(query).to_pandas()
+    if not df.empty:
+        df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'] = pd.to_datetime(df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'])
+        df['LAST_METADATA_COLLECTION_TIMESTAMP'] = pd.to_datetime(df['LAST_METADATA_COLLECTION_TIMESTAMP'])
+        df['LATEST_DATA_TIMESTAMP'] = pd.to_datetime(df['LATEST_DATA_TIMESTAMP'])
+        df['UPDATED_AT'] = pd.to_datetime(df['UPDATED_AT'])
+    return df
+
+
+# --- Helper to manage widget state persistence ---
+def persist_widget_state(key_prefix):
+    temp_key = f"_{key_prefix}"
+    perm_key = key_prefix
+    if temp_key in st.session_state:
+        st.session_state[perm_key] = st.session_state[temp_key]
+
+def load_widget_state(key_prefix, default_value):
+    perm_key = key_prefix
+    temp_key = f"_{key_prefix}"
+    if perm_key not in st.session_state:
+        st.session_state[perm_key] = default_value
+    st.session_state[temp_key] = st.session_state[perm_key]
+    return st.session_state[perm_key]
+
+
+# --- Main Render Function for the DT Health Tab ---
+def render_dt_health_tab():
+    st.header("Dynamic Table Health Dashboard")
+    st.write("Overview of driver execution, collection status, and detailed table health.")
+
+    # --- 1. Fetch Data ---
+    driver_history_df = fetch_driver_execution_history_summary()
+    all_tracking_data_df = fetch_dt_tracking_data() # Fetches all data initially
+
+    if all_tracking_data_df.empty:
+        st.info("No data available from tracking tables. Please check data sources.", icon="ℹ️")
+        return
+    
+    # --- Apply Filters for DT Health Tab (Local to this tab, with interdependencies) ---
+    st.markdown("---")
+    st.subheader("Apply Filters for DT Health")
+
+    # Load initial filter states using the persistence helpers
+    # Use distinct keys for this tab's filters (e.g., 'dt_health_db_filter')
+    current_db_filter = load_widget_state('dt_health_db_filter', 'All')
+    current_schema_filter = load_widget_state('dt_health_schema_filter', 'All')
+    current_table_filter = load_widget_state('dt_health_table_filter', ['All'])
+    current_scheduling_state_filter = load_widget_state('dt_health_scheduling_state_filter', ['All'])
+    current_time_format_option = load_widget_state('dt_health_time_format_option', 'mixed') # For the radio button
+
+    filter_cols_row1 = st.columns(3) # DB, Schema, Table
+    with filter_cols_row1[0]:
+        # --- Database Filter (Parent) ---
+        all_databases = ['All'] + sorted(all_tracking_data_df['DATABASE_NAME'].unique().tolist())
+        db_index = all_databases.index(current_db_filter) if current_db_filter in all_databases else 0
+        
+        selected_db = st.selectbox(
+            "Database:",
+            options=all_databases,
+            key="_dt_health_db_filter", # Dummy key for persistence
+            index=db_index,
+            on_change=persist_widget_state, args=("dt_health_db_filter",)
+        )
+        # Update current_db_filter immediately based on widget's return value
+        # This is needed because subsequent widgets in this rerun depend on it.
+        current_db_filter = selected_db 
+
+    with filter_cols_row1[1]:
+        # --- Schema Filter (Child of Database) ---
+        schema_options_df = all_tracking_data_df.copy()
+        if current_db_filter != 'All':
+            schema_options_df = schema_options_df[schema_options_df['DATABASE_NAME'] == current_db_filter]
+        
+        all_schemas = ['All'] + sorted(schema_options_df['SCHEMA_NAME'].unique().tolist())
+        
+        # Adjust current_schema_filter if it's no longer valid for the selected DB
+        if current_schema_filter not in all_schemas:
+            current_schema_filter = 'All' # Reset to 'All'
+            st.session_state.dt_health_schema_filter = 'All' # Persist reset
+        
+        schema_index = all_schemas.index(current_schema_filter) if current_schema_filter in all_schemas else 0
+
+        selected_schema = st.selectbox(
+            "Schema:",
+            options=all_schemas,
+            key="_dt_health_schema_filter", # Dummy key
+            index=schema_index,
+            on_change=persist_widget_state, args=("dt_health_schema_filter",)
+        )
+        current_schema_filter = selected_schema # Update for cascading
+
+
+    with filter_cols_row1[2]:
+        # --- Table Filter (Child of Schema) ---
+        table_options_df = schema_options_df.copy()
+        if current_schema_filter != 'All':
+            table_options_df = table_options_df[table_options_df['SCHEMA_NAME'] == current_schema_filter]
+        
+        all_tables = ['All'] + sorted(table_options_df['TABLE_NAME'].unique().tolist())
+
+        # Adjust current_table_filter if any selected table is no longer valid
+        valid_current_tables = [t for t in current_table_filter if t in all_tables]
+        if not valid_current_tables and 'All' in all_tables: # If nothing selected and 'All' is an option, pick 'All'
+             valid_current_tables = ['All']
+             st.session_state.dt_health_table_filter = ['All'] # Persist reset
+
+        selected_tables = st.multiselect(
+            "Table(s):",
+            options=all_tables,
+            key="_dt_health_table_filter", # Dummy key
+            default=valid_current_tables,
+            on_change=persist_widget_state, args=("dt_health_table_filter",)
+        )
+        current_table_filter = selected_tables # Update for filtering
+
+
+    filter_cols_row2 = st.columns([0.5, 0.5]) # Scheduling State, Time Format
+    with filter_cols_row2[0]:
+        # --- Scheduling State Filter ---
+        all_scheduling_states = ['All'] + sorted(all_tracking_data_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'].unique().tolist())
+        
+        valid_current_sched_states = [s for s in current_scheduling_state_filter if s in all_scheduling_states]
+        if not valid_current_sched_states and 'All' in all_scheduling_states:
+             valid_current_sched_states = ['All']
+             st.session_state.dt_health_scheduling_state_filter = ['All']
+
+        selected_sched_state = st.multiselect(
+            "Scheduling State(s):",
+            options=all_scheduling_states,
+            key="_dt_health_scheduling_state_filter",
+            default=valid_current_sched_states,
+            on_change=persist_widget_state, args=("dt_health_scheduling_state_filter",)
+        )
+        current_scheduling_state_filter = selected_sched_state
+
+
+    with filter_cols_row2[1]:
+        # --- Display Lag Times In (Radio Button) ---
+        all_time_formats = ["mixed", "seconds", "minutes", "hours", "days"]
+        time_format_index = all_time_formats.index(current_time_format_option) if current_time_format_option in all_time_formats else 0
+
+        selected_time_format = st.radio(
+            "Display Lag Times In:",
+            options=all_time_formats,
+            index=time_format_index,
+            horizontal=True,
+            key="_dt_health_time_format_option", # Dummy key
+            on_change=persist_widget_state, args=("dt_health_time_format_option",)
+        )
+        current_time_format_option = selected_time_format # Update for formatting
+
+    st.markdown("---")
+
+
+    # --- Apply LOCAL Filters (Second Level of Filtering) to tracking_data_df ---
+    # Apply these filters to the copy of the globally filtered data
+    tracking_data_df = tracking_data_df.copy()
+
+    if current_db_filter != 'All':
+        tracking_data_df = tracking_data_df[tracking_data_df['DATABASE_NAME'] == current_db_filter]
+    if current_schema_filter != 'All':
+        tracking_data_df = tracking_data_df[tracking_data_df['SCHEMA_NAME'] == current_schema_filter]
+    if 'All' not in current_table_filter:
+        tracking_data_df = tracking_data_df[tracking_data_df['TABLE_NAME'].isin(current_table_filter)]
+    if 'All' not in current_scheduling_state_filter:
+        tracking_data_df = tracking_data_df[tracking_data_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'].isin(current_scheduling_state_filter)]
+    # Note: `current_time_format_option` is used for formatting columns later, not for filtering the DataFrame directly.
+
+
+    if tracking_data_df.empty:
+        st.info("No tables match the selected local filters (after applying global filters).", icon="ℹ️")
+        return
+
+    # --- Rest of your dt_health_tab.py rendering logic (KPIs, Charts, Table) ---
+    # This section remains largely the same, using `tracking_data_df` and `driver_history_df`
+    # and `current_time_format_option` for rendering.
+
+    # ... (KPIs section) ...
+
+    # ... (Charts section) ...
+
+    # ... (Detailed Table section - adjust column formatting to use current_time_format_option) ...
+
+    # Example of adjusting column formatting for detailed table using current_time_format_option
+    display_df = tracking_data_df.copy() # Start from the locally filtered data
+
+    # Apply time formatting here based on current_time_format_option
+    # Assuming your tracking data df has MEAN_LAG_SEC, etc., from the JOIN.
+    if 'MEAN_LAG_SEC' in display_df.columns:
+        display_df['MEAN_LAG_SEC_FMT'] = format_seconds_to_readable(display_df['MEAN_LAG_SEC'], current_time_format_option)
+    if 'MAXIMUM_LAG_SEC' in display_df.columns:
+        display_df['MAXIMUM_LAG_SEC_FMT'] = format_seconds_to_readable(display_df['MAXIMUM_LAG_SEC'], current_time_format_option)
+
+    # And your other formatting for timestamps
+    display_df['LAST_RH_COLLECT_TIME'] = display_df['LAST_REFRESH_HISTORY_COLLECTION_TIMESTAMP'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    display_df['LAST_MD_COLLECT_TIME'] = display_df['LAST_METADATA_COLLECTION_TIMESTAMP'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    display_df['LATEST_DATA_TIMESTAMP_FMT'] = display_df['LATEST_DATA_TIMESTAMP'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    display_df['TRACKING_RECORD_LAST_UPDATED'] = display_df['UPDATED_AT'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    display_df = display_df.drop(columns=[
+        'LAST_REFRESH_HISTORY_COLLECTION_MESSAGE', 
+        'LAST_METADATA_COLLECTION_MESSAGE'
+    ], errors='ignore') 
+
+    display_df = display_df.rename(columns={
+        'QUALIFIED_NAME': 'Dynamic Table',
+        'IS_ACTIVE': 'Active?',
+        'TRACK_REFRESH_HISTORY': 'Track RH?',
+        'LAST_REFRESH_HISTORY_COLLECTION_STATUS': 'Last RH Status',
+        'TRACK_METADATA_SNAPSHOT': 'Track Metadata?',
+        'LAST_METADATA_COLLECTION_STATUS': 'Last Metadata Status',
+        'LAST_RH_COLLECT_TIME': 'Last RH Collect Time',
+        'LAST_MD_COLLECT_TIME': 'Last Metadata Collect Time',
+        'LATEST_DATA_TIMESTAMP': 'Latest Data Time',
+        'UPDATED_AT': 'Tracking Record Last Updated'
+    })
+
+    # Adjust final_cols_order to include formatted lag columns if they exist
+    final_cols_order = [
+        'Dynamic Table',
+        'Active?',
+        'Track RH?',
+        'Last RH Collect Time',
+        'Last RH Status',
+        'Track Metadata?',
+        'Last Metadata Collect Time',
+        'Last Metadata Status',
+        'Latest Data Time',
+        # Add formatted lag columns if present and desired
+        'MEAN_LAG_SEC_FMT', # Assuming these are added dynamically above
+        'MAXIMUM_LAG_SEC_FMT',
+        'Tracking Record Last Updated'
+    ]
+    # Filter to only include columns that actually exist in the DataFrame for robustness
+    final_display_df = display_df[[col for col in final_cols_order if col in display_df.columns]]
+
+    st.dataframe(final_display_df, use_container_width=True)
