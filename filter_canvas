@@ -1,48 +1,64 @@
+# tabs/filter_canvas.py (Simplified filter management)
 import streamlit as st
 import pandas as pd
 
-# Assuming get_snowflake_session() is available from a utils file
-# from utils.snowflake_utils import get_snowflake_session
+# (Assume get_snowflake_session() is available via st.session_state.get_snowflake_session())
 
-@st.cache_data(ttl=(12*60*60)) # Cache options to avoid re-fetching on every rerun
-def get_all_filter_options():
-    """Fetches all unique values for filter dropdowns from T_DYNAMIC_TABLE_TRACKING."""
+@st.cache_data(ttl=(12*60*60))
+def get_all_filter_options_data():
     session = st.session_state.get_snowflake_session()
     TRACKING_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_TRACKING"
+    METADATA_SNAPSHOT_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_METADATA_LATEST_SNAPSHOT"
 
     query = f"""
     SELECT DISTINCT
-        DATABASE_NAME,
-        SCHEMA_NAME,
-        TABLE_NAME,
-        SCHEDULING_STATE_STATUS,
-        IS_ACTIVE
+        t.DOMAIN_NAME,
+        t.SUB_DOMAIN_NAME,
+        t.DATABASE_NAME,
+        t.SCHEMA_NAME,
+        t.TABLE_NAME,
+        t.LAST_REFRESH_HISTORY_COLLECTION_STATUS AS SCHEDULING_STATE_STATUS,
+        t.IS_ACTIVE,
+        ms.TARGET_LAG_SEC
     FROM
-        {TRACKING_TABLE_FQDN}
-    ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, SCHEDULING_STATE_STATUS
+        {TRACKING_TABLE_FQDN} AS t
+    LEFT JOIN
+        {METADATA_SNAPSHOT_TABLE_FQDN} AS ms
+    ON
+        t.QUALIFIED_NAME = ms.QUALIFIED_NAME
+    ORDER BY t.DOMAIN_NAME, t.SUB_DOMAIN_NAME, t.DATABASE_NAME, t.SCHEMA_NAME, t.TABLE_NAME, SCHEDULING_STATE_STATUS, ms.TARGET_LAG_SEC
     """
     df = session.sql(query).to_pandas()
+    
+    if 'TARGET_LAG_SEC' in df.columns:
+        df['TARGET_LAG_SEC'] = pd.to_numeric(df['TARGET_LAG_SEC'], errors='coerce')
+        df['TARGET_LAG_SEC_FMT'] = df['TARGET_LAG_SEC'].apply(lambda x: f"{int(x)}s" if pd.notna(x) else None)
+
     return df
+
+# Remove persist_widget_state and load_widget_state functions here.
+# Their logic will be handled implicitly by Streamlit's default behavior + session_state access.
+
 
 def render_filter_canvas_tab():
     st.header("Global Filter Canvas")
     st.write("Set high-level filters here to apply across all relevant dashboard tabs. Each dashboard tab can apply further refinements.")
 
-    # Initialize session state for global filters if they don't exist
-    # These keys should be unique and distinct from per-tab filter keys.
-    if 'global_db_filter' not in st.session_state:
-        st.session_state.global_db_filter = 'All'
-    if 'global_schema_filter' not in st.session_state:
-        st.session_state.global_schema_filter = 'All'
-    if 'global_table_filter' not in st.session_state:
-        st.session_state.global_table_filter = ['All']
-    if 'global_scheduling_state_filter' not in st.session_state:
-        st.session_state.global_scheduling_state_filter = ['All']
-    if 'global_is_active_filter' not in st.session_state:
-        st.session_state.global_is_active_filter = 'All' # 'All', 'True', 'False'
+    # --- Initialize Session State for ALL Global Filters ---
+    # These must be initialized *once* at the top-level app_driver.py or this filter_canvas.py
+    # if they are not already.
+    if 'global_domain_name' not in st.session_state: st.session_state.global_domain_name = 'All'
+    if 'global_sub_domain_name' not in st.session_state: st.session_state.global_sub_domain_name = 'All'
+    if 'global_db_filter' not in st.session_state: st.session_state.global_db_filter = 'All'
+    if 'global_schema_filter' not in st.session_state: st.session_state.global_schema_filter = 'All'
+    if 'global_table_filter' not in st.session_state: st.session_state.global_table_filter = ['All']
+    if 'global_scheduling_state_filter' not in st.session_state: st.session_state.global_scheduling_state_filter = ['All']
+    if 'global_target_lag' not in st.session_state: st.session_state.global_target_lag = ['All']
+    if 'display_lag_times_in' not in st.session_state: st.session_state.display_lag_times_in = 'mixed'
+    if 'global_is_active_filter' not in st.session_state: st.session_state.global_is_active_filter = 'All'
 
-    # Fetch all possible filter options
-    all_options_df = get_all_filter_options()
+
+    all_options_df = get_all_filter_options_data()
 
     if all_options_df.empty:
         st.info("No data available to populate filters. Please check the tracking table.", icon="ℹ️")
@@ -51,71 +67,116 @@ def render_filter_canvas_tab():
     st.markdown("---")
     st.subheader("Master Filters")
 
-    # Filter widgets for Database, Schema, Table, etc.
-    # Bind directly to st.session_state for persistence
+    # This DataFrame will be progressively filtered to get options for cascading dropdowns
+    current_options_for_cascading = all_options_df.copy()
 
-    filter_cols_row1 = st.columns(3)
+    # Get initial values from session state for widgets.
+    # Streamlit will automatically reset widgets to index=0 if the value from session_state.key
+    # is not in the widget's current options. This is the desired cascading behavior.
+    
+    filter_cols_row1 = st.columns(3) # Domain, SubDomain, Database
+    filter_cols_row2 = st.columns(3) # Schema, Table(s), Scheduling State(s)
+    filter_cols_row3 = st.columns(2) # Target Lag, Is Active
+    filter_cols_row4 = st.columns(1) # Display Lag Times In (radio)
+
+
+    # --- Domain Name Filter (Top-level parent) ---
     with filter_cols_row1[0]:
-        all_databases = ['All'] + sorted(all_options_df['DATABASE_NAME'].unique().tolist())
+        all_domains = ['All'] + sorted(current_options_for_cascading['DOMAIN_NAME'].unique().tolist())
+        # Streamlit will automatically select st.session_state.global_domain_name if it's in options,
+        # otherwise it defaults to index 0 ('All').
+        selected_domain = st.selectbox(
+            "Domain Name:",
+            options=all_domains,
+            key="global_domain_name" # Direct session state key
+        )
+        # Filter the options for the next dependent widget immediately
+        if selected_domain != 'All':
+            current_options_for_cascading = current_options_for_cascading[current_options_for_cascading['DOMAIN_NAME'] == selected_domain]
+
+    # --- Sub Domain Name Filter (Depends on Domain) ---
+    with filter_cols_row1[1]:
+        all_sub_domains = ['All'] + sorted(current_options_for_cascading['SUB_DOMAIN_NAME'].dropna().unique().tolist())
+        selected_sub_domain = st.selectbox(
+            "Sub Domain Name:",
+            options=all_sub_domains,
+            key="global_sub_domain_name" # Direct session state key
+        )
+        if selected_sub_domain != 'All':
+            current_options_for_cascading = current_options_for_cascading[current_options_for_cascading['SUB_DOMAIN_NAME'] == selected_sub_domain]
+
+    # --- Database Filter (Depends on Sub Domain) ---
+    with filter_cols_row1[2]:
+        all_databases = ['All'] + sorted(current_options_for_cascading['DATABASE_NAME'].unique().tolist())
         selected_db = st.selectbox(
             "Database:",
             options=all_databases,
-            key="canvas_db_filter",
-            default=st.session_state.global_db_filter # Set default from session state
+            key="global_db_filter" # Direct session state key
         )
-        # Update session state on change
-        st.session_state.global_db_filter = selected_db
-
-    with filter_cols_row1[1]:
-        # Schema options depend on selected Database
-        schema_options_df = all_options_df.copy()
         if selected_db != 'All':
-            schema_options_df = schema_options_df[schema_options_df['DATABASE_NAME'] == selected_db]
-        
-        all_schemas = ['All'] + sorted(schema_options_df['SCHEMA_NAME'].unique().tolist())
+            current_options_for_cascading = current_options_for_cascading[current_options_for_cascading['DATABASE_NAME'] == selected_db]
+    
+    # --- Schema Filter (Depends on Database) ---
+    with filter_cols_row2[0]:
+        all_schemas = ['All'] + sorted(current_options_for_cascading['SCHEMA_NAME'].unique().tolist())
         selected_schema = st.selectbox(
             "Schema:",
             options=all_schemas,
-            key="canvas_schema_filter",
-            default=st.session_state.global_schema_filter
+            key="global_schema_filter" # Direct session state key
         )
-        st.session_state.global_schema_filter = selected_schema
-
-    with filter_cols_row1[2]:
-        # Table options depend on selected Database and Schema
-        table_options_df = schema_options_df.copy() # Starts with schema-filtered data
         if selected_schema != 'All':
-            table_options_df = table_options_df[table_options_df['SCHEMA_NAME'] == selected_schema]
-        
-        all_tables = ['All'] + sorted(table_options_df['TABLE_NAME'].unique().tolist())
+            current_options_for_cascading = current_options_for_cascading[current_options_for_cascading['SCHEMA_NAME'] == selected_schema]
+
+    # --- Table(s) Filter (Depends on Schema) ---
+    with filter_cols_row2[1]:
+        all_tables = ['All'] + sorted(current_options_for_cascading['TABLE_NAME'].unique().tolist())
         selected_tables = st.multiselect(
             "Table(s):",
             options=all_tables,
-            key="canvas_table_filter",
-            default=st.session_state.global_table_filter
+            key="global_table_filter" # Direct session state key
         )
-        st.session_state.global_table_filter = selected_tables
+        # Note: Multiselect default handling is a bit different, but Streamlit is smart
+        # If 'All' is removed from options, but still in selected_tables, it will be cleared.
 
-    filter_cols_row2 = st.columns(2)
-    with filter_cols_row2[0]:
+
+    # --- Scheduling State(s) Filter (Independent) ---
+    with filter_cols_row2[2]:
         all_scheduling_states = ['All'] + sorted(all_options_df['SCHEDULING_STATE_STATUS'].unique().tolist())
         selected_sched_state = st.multiselect(
             "Scheduling State(s):",
             options=all_scheduling_states,
-            key="canvas_scheduling_state_filter",
-            default=st.session_state.global_scheduling_state_filter
+            key="global_scheduling_state_filter" # Direct session state key
         )
-        st.session_state.global_scheduling_state_filter = selected_sched_state
 
-    with filter_cols_row2[1]:
-        all_active_states = ['All', 'True', 'False']
+    # --- Target Lag (seconds) Filter (Independent) ---
+    with filter_cols_row3[0]:
+        # Use formatted lags for options
+        all_target_lags_formatted = ['All'] + sorted(all_options_df['TARGET_LAG_SEC_FMT'].dropna().unique().tolist())
+        selected_target_lag = st.multiselect(
+            "Target Lag (seconds):",
+            options=all_target_lags_formatted,
+            key="global_target_lag" # Direct session state key
+        )
+
+    # --- Is Active Filter (Independent) ---
+    with filter_cols_row3[1]:
+        all_active_states = ['All', True, False]
         selected_active_state = st.selectbox(
             "Is Active:",
             options=all_active_states,
-            key="canvas_is_active_filter",
-            default=st.session_state.global_is_active_filter
+            key="global_is_active_filter" # Direct session state key
         )
-        st.session_state.global_is_active_filter = selected_active_state
+
+    # --- Display Lag Times In (Independent) ---
+    with filter_cols_row4[0]:
+        all_time_formats = ["mixed", "seconds", "minutes", "hours", "days"]
+        selected_time_format = st.radio(
+            "Display Lag Times In:",
+            options=all_time_formats,
+            key="display_lag_times_in", # Direct session state key
+            horizontal=True
+        )
+
 
     st.markdown("---")
     st.info("These filters will be automatically applied as a first level of filtering on relevant dashboard tabs.", icon="ℹ️")
