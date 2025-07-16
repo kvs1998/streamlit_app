@@ -1,0 +1,368 @@
+# tabs/filter_canvas.py (Full revised code)
+import streamlit as st
+import pandas as pd
+
+# Assume get_snowflake_session, persist_widget_state, load_widget_state are defined
+# (copy-pasted here for a self-contained example, in real app keep them in utils)
+
+# --- Helper to manage widget state persistence ---
+def persist_widget_state(key_prefix):
+    temp_key = f"_{key_prefix}"
+    perm_key = key_prefix
+    if temp_key in st.session_state:
+        st.session_state[perm_key] = st.session_state[temp_key]
+
+def load_widget_state(key_prefix, default_value):
+    perm_key = key_prefix
+    temp_key = f"_{key_prefix}"
+    if perm_key not in st.session_state:
+        st.session_state[perm_key] = default_value
+    st.session_state[temp_key] = st.session_state[perm_key]
+    return st.session_state[perm_key]
+
+@st.cache_data(ttl=(12*60*60))
+def get_all_filter_options_data():
+    session = st.session_state.get_snowflake_session()
+    TRACKING_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_TRACKING"
+    query = f"""
+    SELECT DISTINCT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        TABLE_NAME,
+        LAST_REFRESH_HISTORY_COLLECTION_STATUS AS SCHEDULING_STATE_STATUS,
+        IS_ACTIVE
+        -- Add other columns like DOMAIN_NAME, SUB_DOMAIN_NAME, TARGET_LAG here if needed
+    FROM {TRACKING_TABLE_FQDN}
+    ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, SCHEDULING_STATE_STATUS
+    """
+    df = session.sql(query).to_pandas()
+    return df
+
+# --- Filter Definitions Map ---
+FILTER_DEFINITIONS = [
+    {
+        'id': 'database',
+        'label': "Database:",
+        'column_name': 'DATABASE_NAME',
+        'widget_type': 'selectbox',
+        'default_value': 'All'
+    },
+    {
+        'id': 'schema',
+        'label': "Schema:",
+        'column_name': 'SCHEMA_NAME',
+        'widget_type': 'selectbox',
+        'default_value': 'All',
+        'depends_on': 'database' # Key of the parent filter
+    },
+    {
+        'id': 'table_name',
+        'label': "Table(s):",
+        'column_name': 'TABLE_NAME',
+        'widget_type': 'multiselect',
+        'default_value': ['All'],
+        'depends_on': 'schema' # Key of the parent filter
+    },
+    {
+        'id': 'scheduling_state',
+        'label': "Scheduling State(s):",
+        'column_name': 'SCHEDULING_STATE_STATUS',
+        'widget_type': 'multiselect',
+        'default_value': ['All']
+    },
+    {
+        'id': 'is_active',
+        'label': "Is Active:",
+        'column_name': 'IS_ACTIVE',
+        'widget_type': 'selectbox',
+        'default_value': 'All',
+        'options_override': ['All', True, False] # Specific options for boolean/custom lists
+    }
+    # Add other filters (Domain, Sub Domain, Target Lag) here following the pattern
+    # For Target Lag (seconds) - it would be a custom number input or slider, or selectbox with ranges.
+    # If a numeric range, this map needs to define min/max.
+]
+
+def render_dynamic_filters(options_df: pd.DataFrame, filter_prefix: str = "global_"):
+    """
+    Renders a set of interdependent filter widgets and manages their state.
+    
+    Args:
+        options_df (pd.DataFrame): DataFrame containing all possible filter options.
+        filter_prefix (str): Prefix for session state keys (e.g., 'global_').
+    
+    Returns:
+        pd.DataFrame: The current selections from all filters.
+    """
+    
+    current_selections = {} # To store current selection of each filter in this rerun
+    
+    # Initialize/load states for all filters based on their definitions
+    for f_def in FILTER_DEFINITIONS:
+        load_widget_state(f"{filter_prefix}{f_def['id']}", f_def['default_value'])
+
+    # Organize filters into columns (adjust column layout as needed)
+    filter_cols_layout = [st.columns(3), st.columns(2)] # Example: 2 rows of columns
+
+    col_idx_map = {
+        'database': filter_cols_layout[0][0],
+        'schema': filter_cols_layout[0][1],
+        'table_name': filter_cols_layout[0][2],
+        'scheduling_state': filter_cols_layout[1][0],
+        'is_active': filter_cols_layout[1][1]
+    }
+    # Add more mappings for Domain, Sub Domain, Target Lag if you add them to FILTER_DEFINITIONS
+
+    # Iterate through filter definitions in their specified order (important for dependencies)
+    for f_def in FILTER_DEFINITIONS:
+        col = col_idx_map.get(f_def['id'])
+        if col is None: # Skip if this filter not mapped to a column yet
+            continue
+
+        with col:
+            # 1. Determine available options for this filter
+            available_options = options_df.copy()
+            if 'depends_on' in f_def:
+                parent_id = f_def['depends_on']
+                parent_selection = current_selections.get(parent_id) # Get parent's live selection
+                parent_col_name = next(fd['column_name'] for fd in FILTER_DEFINITIONS if fd['id'] == parent_id) # Find parent's column name
+                
+                if parent_selection and parent_selection != 'All':
+                    # Handle multiselect parent for filtering
+                    if isinstance(parent_selection, list) and 'All' not in parent_selection:
+                         available_options = available_options[available_options[parent_col_name].isin(parent_selection)]
+                    else: # Single selectbox parent
+                         available_options = available_options[available_options[parent_col_name] == parent_selection]
+            
+            # Get the unique options for the current filter's column
+            if 'options_override' in f_def: # Use predefined options if specified
+                options_list = f_def['options_override']
+            else:
+                options_list = ['All'] + sorted(available_options[f_def['column_name']].unique().tolist())
+            
+            # 2. Determine the initial selection for the widget (handling invalid previous state)
+            current_filter_value = st.session_state[f"{filter_prefix}{f_def['id']}"]
+            
+            # For selectbox: If current value is not in new options, reset to default
+            if f_def['widget_type'] == 'selectbox':
+                if current_filter_value not in options_list:
+                    current_filter_value = f_def['default_value']
+                    st.session_state[f"{filter_prefix}{f_def['id']}"] = current_filter_value # Persist reset
+                    st.session_state[f"_{filter_prefix}{f_def['id']}"] = current_filter_value # Also reset dummy key
+                
+                widget_index = options_list.index(current_filter_value) if current_filter_value in options_list else 0
+                
+                selected_value = st.selectbox(
+                    f_def['label'],
+                    options=options_list,
+                    key=f"_{filter_prefix}{f_def['id']}", # Dummy key
+                    index=widget_index,
+                    on_change=persist_widget_state, args=(f"{filter_prefix}{f_def['id']}",)
+                )
+
+            # For multiselect: Filter out invalid selections, if none valid, reset to default
+            elif f_def['widget_type'] == 'multiselect':
+                valid_selections = [v for v in current_filter_value if v in options_list]
+                if not valid_selections and f_def['default_value'] == ['All'] and 'All' in options_list:
+                    valid_selections = ['All']
+                    st.session_state[f"{filter_prefix}{f_def['id']}"] = ['All'] # Persist reset
+                elif not valid_selections: # If no valid options and default is not ['All'] (or 'All' not available)
+                    valid_selections = [] # Keep empty
+                    st.session_state[f"{filter_prefix}{f_def['id']}"] = []
+
+                selected_value = st.multiselect(
+                    f_def['label'],
+                    options=options_list,
+                    key=f"_{filter_prefix}{f_def['id']}", # Dummy key
+                    default=valid_selections,
+                    on_change=persist_widget_state, args=(f"{filter_prefix}{f_def['id']}",)
+                )
+            # Add other widget types (e.g., number_input for lag) as needed
+            else:
+                st.error(f"Unsupported widget type: {f_def['widget_type']}")
+                selected_value = None
+            
+            current_selections[f_def['id']] = selected_value # Store for next dependencies
+            
+    # Return the current selections (from the permanent session state keys)
+    # This allows the calling tab to filter its DataFrame
+    final_filters_applied = {
+        f_def['id']: st.session_state[f"{filter_prefix}{f_def['id']}"]
+        for f_def in FILTER_DEFINITIONS
+    }
+    return final_filters_applied
+
+
+def render_filter_canvas_tab():
+    st.header("Global Filter Canvas")
+    st.write("Set high-level filters here to apply across all relevant dashboard tabs. Each dashboard tab can apply further refinements.")
+
+    # Render filters using the dynamic helper
+    # Pass all_options_df to the helper so it can derive options
+    all_options_data = get_all_filter_options_data()
+    if all_options_data.empty:
+        st.info("No data available to populate filters. Please check the tracking table.", icon="ℹ️")
+        return
+
+    st.markdown("---")
+    st.subheader("Master Filters")
+
+    # Call the dynamic filter renderer
+    # This function will handle all widget creation and state management
+    current_global_filters = render_dynamic_filters(all_options_data, filter_prefix="global_")
+
+    st.markdown("---")
+    st.info("These filters will be automatically applied as a first level of filtering on relevant dashboard tabs.", icon="ℹ️")
+
+    # Optional: Display current global filters for debugging/confirmation
+    # st.json(current_global_filters)
+
+# End of tabs/filter_canvas.py
+
+
+# tabs/dt_health_tab.py (Modified to use dynamic filters)
+# ... (imports and helper functions remain the same) ...
+
+# Ensure persist_widget_state and load_widget_state are available here as well
+# from tabs.filter_canvas import persist_widget_state, load_widget_state, get_all_filter_options_data, FILTER_DEFINITIONS
+
+
+# --- Main Render Function for the DT Health Tab ---
+def render_dt_health_tab():
+    st.header("Dynamic Table Health Dashboard")
+    st.write("Overview of driver execution, collection status, and detailed table health.")
+
+    # --- 1. Fetch Data ---
+    driver_history_df = fetch_driver_execution_history_summary()
+    all_tracking_data_df = fetch_dt_tracking_data()
+
+    if all_tracking_data_df.empty:
+        st.info("No data available from tracking tables. Please check data sources.", icon="ℹ️")
+        return
+    
+    # --- Apply GLOBAL Filters (First Level of Filtering) ---
+    tracking_data_df = all_tracking_data_df.copy() # Work on a copy
+
+    # Retrieve current global filter selections from session_state
+    # The 'global_' prefix is important here to match keys from filter_canvas.py
+    global_filters = {f_def['id']: st.session_state.get(f"global_{f_def['id']}") for f_def in FILTER_DEFINITIONS}
+
+    if global_filters.get('database') and global_filters['database'] != 'All':
+        tracking_data_df = tracking_data_df[tracking_data_df['DATABASE_NAME'] == global_filters['database']]
+    
+    if global_filters.get('schema') and global_filters['schema'] != 'All':
+        tracking_data_df = tracking_data_df[tracking_data_df['SCHEMA_NAME'] == global_filters['schema']]
+
+    if global_filters.get('table_name') and 'All' not in global_filters['table_name']:
+        tracking_data_df = tracking_data_df[tracking_data_df['TABLE_NAME'].isin(global_filters['table_name'])]
+
+    if global_filters.get('scheduling_state') and 'All' not in global_filters['scheduling_state']:
+        tracking_data_df = tracking_data_df[tracking_data_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'].isin(global_filters['scheduling_state'])]
+
+    if global_filters.get('is_active') and global_filters['is_active'] != 'All':
+        tracking_data_df = tracking_data_df[tracking_data_df['IS_ACTIVE'] == global_filters['is_active']]
+    
+    if tracking_data_df.empty:
+        st.info("No data available based on the current Global Filter Canvas selections. Please adjust your global filters.", icon="ℹ️")
+        return
+
+    # --- Rest of your dt_health_tab.py rendering logic (KPIs, Charts, Table) ---
+    # ... (KPIs, Charts sections remain the same, as they use `tracking_data_df`) ...
+
+    # --- Detailed Collection Status per Table (with local filtering) ---
+    st.subheader("Detailed Collection Status per Table")
+    st.write("View the last collection attempt status and messages for each dynamic table being tracked.")
+
+    if tracking_data_df.empty:
+        st.info("No detailed collection status per table available.", icon="ℹ️")
+        return
+
+    # Local filters (Second Level of Filtering) - apply on top of the already globally filtered tracking_data_df
+    local_filter_cols = st.columns(2)
+
+    # Use a *local* version of render_dynamic_filters if you want *interdependent local filters*
+    # Otherwise, if these two are independent, keep them as simple selectboxes/multiselects.
+    # From your description: "local filters" suggests independent from global, but interdependent on each other.
+    # The simplest is to keep these two local filters simple, as they are not cascading here.
+    
+    all_rh_statuses = ['All'] + sorted(tracking_data_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'].unique().tolist())
+    local_rh_status_val = load_widget_state("local_filter_rh_status", "All")
+    current_rh_index = all_rh_statuses.index(local_rh_status_val) if local_rh_status_val in all_rh_statuses else 0
+
+    selected_rh_status = local_filter_cols[0].selectbox(
+        "Filter by Refresh History Status:", options=all_rh_statuses, key="_local_filter_rh_status", index=current_rh_index,
+        on_change=persist_widget_state, args=("local_filter_rh_status",)
+    )
+
+    all_md_statuses = ['All'] + sorted(tracking_data_df['LAST_METADATA_COLLECTION_STATUS'].unique().tolist())
+    local_md_status_val = load_widget_state("local_filter_md_status", "All")
+    current_md_index = all_md_statuses.index(local_md_status_val) if local_md_status_val in all_md_statuses else 0
+
+    selected_md_status = local_filter_cols[1].selectbox(
+        "Filter by Metadata Snapshot Status:", options=all_md_statuses, key="_local_filter_md_status", index=current_md_index,
+        on_change=persist_widget_state, args=("local_filter_md_status",)
+    )
+
+    # Time format option (also local to this tab)
+    time_format_options_list = ["mixed", "seconds", "minutes", "hours", "days"]
+    current_time_format_option_val = load_widget_state('dt_health_time_format_option', 'mixed')
+    time_format_index = time_format_options_list.index(current_time_format_option_val) if current_time_format_option_val in time_format_options_list else 0
+
+    selected_time_format = st.radio(
+        "Display Lag Times In:",
+        options=time_format_options_list,
+        index=time_format_index,
+        horizontal=True,
+        key="_dt_health_time_format_option", # Dummy key
+        on_change=persist_widget_state, args=("dt_health_time_format_option",)
+    )
+    # The rest of the dt_health_tab code that uses these `selected_rh_status`, `selected_md_status`,
+    # and `selected_time_format` should use these variables directly.
+
+    # Apply local filters to a copy of the globally filtered data
+    locally_filtered_df = tracking_data_df.copy()
+
+    if selected_rh_status != 'All':
+        locally_filtered_df = locally_filtered_df[locally_filtered_df['LAST_REFRESH_HISTORY_COLLECTION_STATUS'] == selected_rh_status]
+    if selected_md_status != 'All':
+        locally_filtered_df = locally_filtered_df[locally_filtered_df['LAST_METADATA_COLLECTION_STATUS'] == selected_md_status]
+
+    if locally_filtered_df.empty:
+        st.info("No tables match the selected local filters (after applying global filters).", icon="ℹ️")
+        return
+
+    # ... (Rest of display logic using `locally_filtered_df` and `selected_time_format`) ...
+    # Make sure your formatting uses `selected_time_format` correctly
+    display_df = locally_filtered_df.copy()
+    
+    # ... (Formatting, dropping columns, renaming columns) ...
+
+    # Final rendering of the DataFrame
+    st.dataframe(final_display_df, use_container_width=True)
+
+
+
+# app_driver.py
+import streamlit as st
+from snowflake.snowpark import Session # Or your connector of choice
+
+# Define get_snowflake_session or import from utils
+@st.cache_resource
+def get_snowflake_session_cached():
+    return Session.builder.configs(st.secrets["snowflake"]).create()
+
+if 'get_snowflake_session' not in st.session_state:
+    st.session_state.get_snowflake_session = get_snowflake_session_cached
+
+# Now you can import and render tabs
+import tabs.dt_health_tab as dt_health_tab
+import tabs.filter_canvas as filter_canvas_tab # Ensure this is imported
+# ... (other tab imports) ...
+
+selected_tab = st.sidebar.radio("Navigation", ["Dashboard", "Filter Canvas", "..."], index=0)
+
+if selected_tab == "Dashboard":
+    dt_health_tab.render_dt_health_tab()
+elif selected_tab == "Filter Canvas":
+    filter_canvas_tab.render_filter_canvas_tab()
+# ... (other tab rendering) ...
