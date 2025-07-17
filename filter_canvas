@@ -1,75 +1,18 @@
-# tabs/filter_canvas.py (Corrected using load/persist and no FILTER_DEFINITIONS)
-import streamlit as st
-import pandas as pd
-
-# (Assume get_snowflake_session() is available via st.session_state.get_snowflake_session())
-
-@st.cache_data(ttl=(12*60*60))
-def get_all_filter_options_data():
-    session = st.session_state.get_snowflake_session()
-    TRACKING_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_TRACKING"
-    METADATA_SNAPSHOT_TABLE_FQDN = "YOUR_DB.YOUR_SCHEMA.T_DYNAMIC_TABLE_METADATA_LATEST_SNAPSHOT"
-
-    query = f"""
-    SELECT DISTINCT
-        t.DOMAIN_NAME,
-        t.SUB_DOMAIN_NAME,
-        t.DATABASE_NAME,
-        t.SCHEMA_NAME,
-        t.TABLE_NAME,
-        t.QUALIFIED_NAME,
-        t.LAST_REFRESH_HISTORY_COLLECTION_STATUS AS SCHEDULING_STATE_STATUS,
-        t.IS_ACTIVE,
-        ms.TARGET_LAG_SEC
-    FROM
-        {TRACKING_TABLE_FQDN} AS t
-    LEFT JOIN
-        {METADATA_SNAPSHOT_TABLE_FQDN} AS ms
-    ON
-        t.QUALIFIED_NAME = ms.QUALIFIED_NAME
-    ORDER BY t.DOMAIN_NAME, t.SUB_DOMAIN_NAME, t.DATABASE_NAME, t.SCHEMA_NAME, t.TABLE_NAME, SCHEDULING_STATE_STATUS, ms.TARGET_LAG_SEC
-    """
-    df = session.sql(query).to_pandas()
-    
-    if 'TARGET_LAG_SEC' in df.columns:
-        df['TARGET_LAG_SEC'] = pd.to_numeric(df['TARGET_LAG_SEC'], errors='coerce')
-        df['TARGET_LAG_SEC_FMT'] = df['TARGET_LAG_SEC'].apply(lambda x: f"{int(x)}s" if pd.notna(x) else None)
-
-    return df
-
-# --- Helper to manage widget state persistence ---
-def persist_widget_state(key):
-    # This function is now simpler: it assumes the widget directly writes to st.session_state[key]
-    # and we don't need to do st.session_state[perm_key] = st.session_state[temp_key] manually.
-    # It just forces a rerun after the state update (which Streamlit already does).
-    # Its main purpose here is to act as an on_change callback that is part of the persistent pattern.
-    pass # No explicit action needed if widget key is direct session state key
-
-def load_widget_state(key, default_value):
-    """
-    Ensures a session state key exists with a default value if not set.
-    Returns the current value for widget initialization.
-    """
-    if key not in st.session_state:
-        st.session_state[key] = default_value
-    return st.session_state[key]
-
-
-def render_filter_canvas_tab():
     st.header("Global Filter Canvas")
     st.write("Set high-level filters here to apply across all relevant dashboard tabs. Each dashboard tab can apply further refinements.")
 
-    # --- Initialize Session State for ALL Global Filters (redundant if in app_driver, but safe here) ---
-    # These explicit initializations ensure keys exist for `load_widget_state`.
-    # 'global_is_active_filter' is removed.
-    load_widget_state('global_domain_name', 'All')
-    load_widget_state('global_sub_domain_name', 'All')
-    load_widget_state('global_db_filter', 'All')
-    load_widget_state('global_schema_filter', 'All')
-    load_widget_state('global_table_filter', ['All'])
-    load_widget_state('global_scheduling_state_filter', ['All'])
-    load_widget_state('global_target_lag', ['All'])
-    load_widget_state('display_lag_times_in', 'mixed') # This is the global radio button for format
+    # --- Initialize Session State for ALL Global Filters ---
+    # These explicit initializations ensure keys exist for render logic.
+    # This block should be at the very top of app_driver.py for ultimate persistence.
+    if 'global_domain_name' not in st.session_state: st.session_state.global_domain_name = 'All'
+    if 'global_sub_domain_name' not in st.session_state: st.session_state.global_sub_domain_name = 'All'
+    if 'global_db_filter' not in st.session_state: st.session_state.global_db_filter = 'All'
+    if 'global_schema_filter' not in st.session_state: st.session_state.global_schema_filter = 'All'
+    if 'global_table_filter' not in st.session_state: st.session_state.global_table_filter = ['All']
+    if 'global_scheduling_state_filter' not in st.session_state: st.session_state.global_scheduling_state_filter = ['All']
+    if 'global_target_lag' not in st.session_state: st.session_state.global_target_lag = ['All']
+    # 'global_is_active_filter' removed from this tab's scope
+    if 'display_lag_times_in' not in st.session_state: st.session_state.display_lag_times_in = 'mixed'
 
 
     all_options_df = get_all_filter_options_data()
@@ -81,158 +24,126 @@ def render_filter_canvas_tab():
     st.markdown("---")
     st.subheader("Master Filters")
 
-    # --- Initialize Column Layouts ---
-    cols_row1 = st.columns(4) # Domain, Subdomain, Database, Schema
-    cols_row2 = st.columns(4) # Table(s), Scheduling State, Target Lag, Display Lag Times In
-
     # This DataFrame will be progressively filtered as we derive options for cascading widgets.
     filtered_df_for_cascading_options = all_options_df.copy() 
 
-    # --- Row 1 Filters: Domain Name, Sub Domain Name, Database, Schema ---
-    # These are processed sequentially to update filtered_df_for_cascading_options for next step.
-
-    # 1. Domain Name Filter (Top-level parent)
-    with cols_row1[0]:
-        all_domains = ['All'] + sorted(filtered_df_for_cascading_options['DOMAIN_NAME'].unique().tolist())
-        current_domain_name = load_widget_state('global_domain_name', 'All')
-        if current_domain_name not in all_domains: # Reset if value is no longer valid
-            st.session_state.global_domain_name = 'All'
-            current_domain_name = 'All' # Use the reset value for current run
-        selected_domain_name = st.selectbox(
-            "Domain Name:",
-            options=all_domains,
-            key="global_domain_name", # Key directly links to session_state
-            index=all_domains.index(current_domain_name), # Pre-select
-            on_change=persist_widget_state, args=("global_domain_name",) # Optional: redundant but safe
-        )
-        if selected_domain_name != 'All': # Filter for next dropdown
-            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DOMAIN_NAME'] == selected_domain_name]
-
-    # 2. Sub Domain Name Filter (Depends on Domain)
-    with cols_row1[1]:
-        all_sub_domains = ['All'] + sorted(filtered_df_for_cascading_options['SUB_DOMAIN_NAME'].dropna().unique().tolist())
-        current_sub_domain_name = load_widget_state('global_sub_domain_name', 'All')
-        if current_sub_domain_name not in all_sub_domains: # Reset if invalid
-            st.session_state.global_sub_domain_name = 'All'
-            current_sub_domain_name = 'All'
-        selected_sub_domain_name = st.selectbox(
-            "Sub Domain Name:",
-            options=all_sub_domains,
-            key="global_sub_domain_name",
-            index=all_sub_domains.index(current_sub_domain_name),
-            on_change=persist_widget_state, args=("global_sub_domain_name",)
-        )
-        if selected_sub_domain_name != 'All': # Filter for next dropdown
-            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SUB_DOMAIN_NAME'] == selected_sub_domain_name]
-
-    # 3. Database Filter (Depends on Sub Domain)
-    with cols_row1[2]:
-        all_databases = ['All'] + sorted(filtered_df_for_cascading_options['DATABASE_NAME'].unique().tolist())
-        current_db_filter = load_widget_state('global_db_filter', 'All')
-        if current_db_filter not in all_databases: # Reset if invalid
-            st.session_state.global_db_filter = 'All'
-            current_db_filter = 'All'
-        selected_db_filter = st.selectbox(
-            "Database:",
-            options=all_databases,
-            key="global_db_filter",
-            index=all_databases.index(current_db_filter),
-            on_change=persist_widget_state, args=("global_db_filter",)
-        )
-        if selected_db_filter != 'All': # Filter for next dropdown
-            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DATABASE_NAME'] == selected_db_filter]
+    # --- Step 1: Filter `current_options_for_cascading` based on current selection of parents ---
+    # This block ensures `filtered_df_for_cascading_options` is correct for each subsequent child widget.
+    # It must process parents in logical order: Domain -> SubDomain -> DB -> Schema
     
-    # 4. Schema Filter (Depends on Database)
-    with cols_row1[3]:
+    # Domain Name (no parent)
+    selected_domain_temp = st.session_state.global_domain_name
+    if selected_domain_temp != 'All':
+        filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DOMAIN_NAME'] == selected_domain_temp]
+
+    # Sub Domain Name (depends on Domain)
+    selected_sub_domain_temp = st.session_state.global_sub_domain_name
+    if selected_sub_domain_temp != 'All':
+        filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SUB_DOMAIN_NAME'] == selected_sub_domain_temp]
+
+    # Database (depends on Sub Domain)
+    selected_db_temp = st.session_state.global_db_filter
+    if selected_db_temp != 'All':
+        filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DATABASE_NAME'] == selected_db_temp]
+    
+    # Schema (depends on Database)
+    selected_schema_temp = st.session_state.global_schema_filter
+    if selected_schema_temp != 'All':
+        filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SCHEMA_NAME'] == selected_schema_temp]
+    
+    # At this point, `filtered_df_for_cascading_options` holds the correct data
+    # to derive options for Schema's children (Table(s)) and beyond.
+
+
+    # --- Step 2: Render Widgets using the (potentially filtered) options ---
+    # Define columns for the 2x4 layout
+    filter_cols_row1 = st.columns(4) # Domain, SubDomain, Database, Schema
+    filter_cols_row2 = st.columns(4) # Table(s), Scheduling State, Target Lag, Display Lag Times In
+
+    # Render Domain Name
+    with filter_cols_row1[0]:
+        all_domains = ['All'] + sorted(all_options_df['DOMAIN_NAME'].unique().tolist()) # Options from original data
+        # Reset if stored value is no longer valid in options, then render
+        if st.session_state.global_domain_name not in all_domains: st.session_state.global_domain_name = 'All'
+        st.selectbox("Domain Name:", options=all_domains, key="global_domain_name", on_change=update_session_state_from_widget)
+
+    # Render Sub Domain Name
+    with filter_cols_row1[1]:
+        # Options depend on current state of selected_domain (filtered_df_for_cascading_options)
+        all_sub_domains = ['All'] + sorted(filtered_df_for_cascading_options['SUB_DOMAIN_NAME'].dropna().unique().tolist())
+        if st.session_state.global_sub_domain_name not in all_sub_domains: st.session_state.global_sub_domain_name = 'All'
+        st.selectbox("Sub Domain Name:", options=all_sub_domains, key="global_sub_domain_name", on_change=update_session_state_from_widget)
+
+    # Render Database
+    with filter_cols_row1[2]:
+        all_databases = ['All'] + sorted(filtered_df_for_cascading_options['DATABASE_NAME'].unique().tolist())
+        if st.session_state.global_db_filter not in all_databases: st.session_state.global_db_filter = 'All'
+        st.selectbox("Database:", options=all_databases, key="global_db_filter", on_change=update_session_state_from_widget)
+
+    # Render Schema
+    with filter_cols_row1[3]:
         all_schemas = ['All'] + sorted(filtered_df_for_cascading_options['SCHEMA_NAME'].unique().tolist())
-        current_schema_filter = load_widget_state('global_schema_filter', 'All')
-        if current_schema_filter not in all_schemas: # Reset if invalid
-            st.session_state.global_schema_filter = 'All'
-            current_schema_filter = 'All'
-        selected_schema_filter = st.selectbox(
-            "Schema:",
-            options=all_schemas,
-            key="global_schema_filter",
-            index=all_schemas.index(current_schema_filter),
-            on_change=persist_widget_state, args=("global_schema_filter",)
-        )
-        # Filter for next dropdown (Table(s)) -- this uses selected_schema_filter
-        if selected_schema_filter != 'All':
-            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SCHEMA_NAME'] == selected_schema_filter]
+        if st.session_state.global_schema_filter not in all_schemas: st.session_state.global_schema_filter = 'All'
+        st.selectbox("Schema:", options=all_schemas, key="global_schema_filter", on_change=update_session_state_from_widget)
 
-
-    # --- Row 2 Filters: Table(s), Scheduling State(s), Target Lag (seconds), Display Lag Times In ---
-
-    # 5. Table(s) Filter (Depends on Schema)
-    with cols_row2[0]:
+    # Render Table(s)
+    with filter_cols_row2[0]:
         all_tables = ['All'] + sorted(filtered_df_for_cascading_options['TABLE_NAME'].unique().tolist())
-        current_table_filter = load_widget_state('global_table_filter', ['All'])
-        
-        # Reset if any selected table is no longer in valid options
-        valid_current_tables = [t for t in current_table_filter if t in all_tables]
-        if not valid_current_tables and 'All' in all_tables: # If no valid selections left, default to ['All']
-             st.session_state.global_table_filter = ['All']
-             current_table_filter = ['All']
-        elif not valid_current_tables: # If no valid selections left and 'All' not in options
-             st.session_state.global_table_filter = []
-             current_table_filter = []
-        else:
-             st.session_state.global_table_filter = valid_current_tables # Update with valid selections
-
-        selected_table_filter = st.multiselect(
+        # Multi-select default handling: filter out invalid selections
+        valid_current_tables = [t for t in st.session_state.global_table_filter if t in all_tables]
+        if not valid_current_tables and 'All' in all_tables: st.session_state.global_table_filter = ['All']
+        elif not valid_current_tables: st.session_state.global_table_filter = []
+        # Update session_state with the validated list (this is the key for multiselect)
+        st.session_state.global_table_filter = valid_current_tables 
+        st.multiselect(
             "Table(s):",
             options=all_tables,
-            key="global_table_filter",
-            default=current_table_filter,
-            on_change=persist_widget_state, args=("global_table_filter",)
+            key="global_table_filter", # Reads from/writes to this
+            default=st.session_state.global_table_filter, # Must provide default for multiselect
+            on_change=update_session_state_from_widget # Update is implicit, but callback triggers rerun
         )
 
-    # 6. Scheduling State(s) Filter (Independent of Domain/DB cascade)
-    with cols_row2[1]:
+    # Render Scheduling State(s)
+    with filter_cols_row2[1]:
         all_scheduling_states = ['All'] + sorted(all_options_df['SCHEDULING_STATE_STATUS'].unique().tolist())
-        current_scheduling_state_filter = load_widget_state('global_scheduling_state_filter', ['All'])
-        valid_current_sched_states = [s for s in current_scheduling_state_filter if s in all_scheduling_states]
-        if not valid_current_sched_states and 'All' in all_scheduling_states:
-             st.session_state.global_scheduling_state_filter = ['All']
-             current_scheduling_state_filter = ['All']
-        selected_sched_state_filter = st.multiselect(
+        valid_current_sched_states = [s for s in st.session_state.global_scheduling_state_filter if s in all_scheduling_states]
+        if not valid_current_sched_states and 'All' in all_scheduling_states: st.session_state.global_scheduling_state_filter = ['All']
+        elif not valid_current_sched_states: st.session_state.global_scheduling_state_filter = []
+        st.session_state.global_scheduling_state_filter = valid_current_sched_states # Update state
+        st.multiselect(
             "Scheduling State(s):",
             options=all_scheduling_states,
             key="global_scheduling_state_filter",
-            default=current_scheduling_state_filter,
-            on_change=persist_widget_state, args=("global_scheduling_state_filter",)
+            default=st.session_state.global_scheduling_state_filter,
+            on_change=update_session_state_from_widget
         )
 
-    # 7. Target Lag (seconds) Filter (Independent)
+    # Render Target Lag (seconds)
     with cols_row2[2]:
         all_target_lags_formatted = ['All'] + sorted(all_options_df['TARGET_LAG_SEC_FMT'].dropna().unique().tolist())
-        current_target_lag_filter = load_widget_state('global_target_lag', ['All'])
-        valid_current_target_lags = [l for l in current_target_lag_filter if l in all_target_lags_formatted]
-        if not valid_current_target_lags and 'All' in all_target_lags_formatted:
-             st.session_state.global_target_lag = ['All']
-             current_target_lag_filter = ['All']
-        selected_target_lag_filter = st.multiselect(
+        valid_current_target_lags = [l for l in st.session_state.global_target_lag if l in all_target_lags_formatted]
+        if not valid_current_target_lags and 'All' in all_target_lags_formatted: st.session_state.global_target_lag = ['All']
+        elif not valid_current_target_lags: st.session_state.global_target_lag = []
+        st.session_state.global_target_lag = valid_current_target_lags # Update state
+        st.multiselect(
             "Target Lag (seconds):",
             options=all_target_lags_formatted,
             key="global_target_lag",
-            default=current_target_lag_filter,
-            on_change=persist_widget_state, args=("global_target_lag",)
+            default=st.session_state.global_target_lag,
+            on_change=update_session_state_from_widget
         )
 
-    # 8. Display Lag Times In (Radio)
+    # Render Display Lag Times In (Radio)
     with cols_row2[3]:
         all_time_formats = ["mixed", "seconds", "minutes", "hours", "days"]
-        current_display_lag_times_in = load_widget_state('display_lag_times_in', 'mixed')
-        if current_display_lag_times_in not in all_time_formats:
-            st.session_state.display_lag_times_in = 'mixed'
-            current_display_lag_times_in = 'mixed'
-        selected_time_format = st.radio(
+        if st.session_state.display_lag_times_in not in all_time_formats: st.session_state.display_lag_times_in = 'mixed'
+        st.radio(
             "Display Lag Times In:",
             options=all_time_formats,
             key="display_lag_times_in",
-            index=all_time_formats.index(current_display_lag_times_in),
+            index=all_time_formats.index(st.session_state.display_lag_times_in), # Radio still needs index
             horizontal=True,
-            on_change=persist_widget_state, args=("display_lag_times_in",)
+            on_change=update_session_state_from_widget
         )
     
     st.markdown("---")
