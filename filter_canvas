@@ -1,8 +1,8 @@
-# tabs/filter_canvas.py (Layout Re-Re-Revised)
+# tabs/filter_canvas.py (Corrected using load/persist and no FILTER_DEFINITIONS)
 import streamlit as st
 import pandas as pd
 
-# Assume get_snowflake_session() is available via st.session_state.get_snowflake_session()
+# (Assume get_snowflake_session() is available via st.session_state.get_snowflake_session())
 
 @st.cache_data(ttl=(12*60*60))
 def get_all_filter_options_data():
@@ -17,6 +17,7 @@ def get_all_filter_options_data():
         t.DATABASE_NAME,
         t.SCHEMA_NAME,
         t.TABLE_NAME,
+        t.QUALIFIED_NAME,
         t.LAST_REFRESH_HISTORY_COLLECTION_STATUS AS SCHEDULING_STATE_STATUS,
         t.IS_ACTIVE,
         ms.TARGET_LAG_SEC
@@ -36,260 +37,205 @@ def get_all_filter_options_data():
 
     return df
 
+# --- Helper to manage widget state persistence ---
+def persist_widget_state(key):
+    # This function is now simpler: it assumes the widget directly writes to st.session_state[key]
+    # and we don't need to do st.session_state[perm_key] = st.session_state[temp_key] manually.
+    # It just forces a rerun after the state update (which Streamlit already does).
+    # Its main purpose here is to act as an on_change callback that is part of the persistent pattern.
+    pass # No explicit action needed if widget key is direct session state key
 
-# --- Filter Definitions Map (Ordered for Cascading Logic, but column mapping is separate) ---
-# Note: The order in this list is for dependency processing (parent before child).
-# The column_layout_index defines where they appear visually.
-FILTER_DEFINITIONS = [
-    {
-        'id': 'domain_name',
-        'label': "Domain Name:",
-        'column_name': 'DOMAIN_NAME',
-        'widget_type': 'selectbox',
-        'default_value': 'All',
-        'column_layout_index': (0,0) # Row 1, Col 1
-    },
-    {
-        'id': 'sub_domain_name',
-        'label': "Sub Domain Name:",
-        'column_name': 'SUB_DOMAIN_NAME',
-        'widget_type': 'selectbox',
-        'default_value': 'All',
-        'depends_on': 'domain_name',
-        'column_layout_index': (0,1) # Row 1, Col 2
-    },
-    {
-        'id': 'database',
-        'label': "Database:",
-        'column_name': 'DATABASE_NAME',
-        'widget_type': 'selectbox',
-        'default_value': 'All',
-        'depends_on': 'sub_domain_name',
-        'column_layout_index': (0,2) # Row 1, Col 3
-    },
-    {
-        'id': 'schema',
-        'label': "Schema:",
-        'column_name': 'SCHEMA_NAME',
-        'widget_type': 'selectbox',
-        'default_value': 'All',
-        'depends_on': 'database',
-        'column_layout_index': (0,3) # Row 1, Col 4
-    },
-    {
-        'id': 'table_name',
-        'label': "Table(s):",
-        'column_name': 'TABLE_NAME',
-        'widget_type': 'multiselect',
-        'default_value': ['All'],
-        'depends_on': 'schema',
-        'column_layout_index': (1,0) # Row 2, Col 1
-    },
-    {
-        'id': 'scheduling_state', # Independent of the domain/db/schema chain
-        'label': "Scheduling State(s):",
-        'column_name': 'SCHEDULING_STATE_STATUS',
-        'widget_type': 'multiselect',
-        'default_value': ['All'],
-        'column_layout_index': (1,1) # Row 2, Col 2
-    },
-    {
-        'id': 'target_lag', # Independent of the domain/db/schema chain
-        'label': "Target Lag (seconds):",
-        'column_name': 'TARGET_LAG_SEC_FMT', # Formatted for display
-        'original_column_name': 'TARGET_LAG_SEC', # For filtering logic
-        'widget_type': 'multiselect',
-        'default_value': ['All'],
-        'column_layout_index': (1,2) # Row 2, Col 3
-    },
-    {
-        'id': 'is_active', # Independent filter, putting it in a separate row for clarity
-        'label': "Is Active:",
-        'column_name': 'IS_ACTIVE',
-        'widget_type': 'selectbox',
-        'default_value': 'All',
-        'options_override': ['All', True, False],
-        'column_layout_index': (2,0) # New Row 3, Col 1
-    }
-]
-
-# Separate filter definition for the independent radio button (Display Lag Times In)
-RADIO_FILTER_DEFINITION = {
-    'id': 'display_lag_times_in',
-    'label': "Display Lag Times In:",
-    'options': ["mixed", "seconds", "minutes", "hours", "days"],
-    'default_value': 'mixed',
-    'column_layout_index': (2,1) # Row 3, Col 2
-}
-
-
-def render_dynamic_filters(all_data_for_options: pd.DataFrame, filter_prefix: str = "global_"):
+def load_widget_state(key, default_value):
     """
-    Renders a set of interdependent filter widgets and manages their state.
-    This function applies the "parent takes priority" reset logic.
-    
-    Args:
-        all_data_for_options (pd.DataFrame): The full DataFrame of data to derive filter options from.
-        filter_prefix (str): Prefix for session state keys (e.g., 'global_').
-    
-    Returns:
-        dict: The current selections from all filters.
+    Ensures a session state key exists with a default value if not set.
+    Returns the current value for widget initialization.
     """
-    
-    # --- Initialize Column Layouts ---
-    # Create the column objects first, which will be reused
-    cols_row1 = st.columns(4) # Domain, Subdomain, Database, Schema
-    cols_row2 = st.columns(4) # Table(s), Scheduling State, Target Lag, Display Lag Times In
-    cols_row3 = st.columns(4) # Is Active (assuming it's independent and needs a row, could combine with other metrics if space allows)
-
-    # Map filter IDs to specific Streamlit column objects based on desired layout
-    col_map = {
-        'domain_name': cols_row1[0],
-        'sub_domain_name': cols_row1[1],
-        'database': cols_row1[2],
-        'schema': cols_row1[3],
-
-        'table_name': cols_row2[0],
-        'scheduling_state': cols_row2[1],
-        'target_lag': cols_row2[2],
-        'display_lag_times_in': cols_row2[3], # Display Lag Times In (radio button)
-
-        'is_active': cols_row3[0] # Example placement for Is Active
-    }
-
-    # This DataFrame will be progressively filtered as we determine selections,
-    # ensuring subsequent children get correct options.
-    filtered_df_for_options_cascade = all_data_for_options.copy() 
-
-    # --- Process filters based on their dependencies (regardless of visual layout order) ---
-    # We must process parents first to get accurate `options_list_for_widget` for children.
-    # The FILTER_DEFINITIONS list order implicitly defines this logical parent-child processing flow.
-    for f_def in FILTER_DEFINITIONS:
-        current_filter_session_key = f"{filter_prefix}{f_def['id']}"
-        
-        # Determine options for THIS filter based on its parent's CURRENTLY SELECTED state
-        # The base options will be derived from `filtered_df_for_options_cascade` 
-        # which carries filters applied by *previous parent filters in the logical dependency chain*.
-        
-        # Step 1: Prepare options_list_for_widget for the current filter
-        # Handle options for cascading filters vs. independent ones
-        if 'depends_on' in f_def:
-            # If dependent, options are derived from the *already filtered* `filtered_df_for_options_cascade`
-            # (which has been filtered by its parents from previous iterations of this loop)
-            options_from_df_for_current_filter = filtered_df_for_options_cascade.copy()
-        else: # Independent filter (like scheduling_state, target_lag, is_active)
-            # Its options are derived from the original, unfiltered `all_data_for_options`
-            options_from_df_for_current_filter = all_data_for_options.copy()
-            
-
-        options_list_for_widget = []
-        if 'options_override' in f_def:
-            options_list_for_widget = f_def['options_override']
-        else:
-            # Use the specified 'column_name' from the current filtered data for options
-            col_to_derive_options_from = f_def['column_name']
-            if col_to_derive_options_from in options_from_df_for_current_filter.columns:
-                options_from_df = options_from_df_for_current_filter[col_to_derive_options_from].dropna().unique().tolist()
-                if f_def['column_name'] == 'IS_ACTIVE': # Special handling for boolean IS_ACTIVE from DF
-                    options_list_for_widget = ['All'] + sorted(options_from_df)
-                else:
-                    options_list_for_widget = ['All'] + sorted(options_from_df)
-            else: # Fallback if column not found (shouldn't happen with correct FQDN)
-                options_list_for_widget = ['All']
-
-
-        # Step 2: Determine the initial selection for the widget (applying "parent takes priority" reset)
-        current_stored_value = st.session_state[current_filter_session_key]
-
-        # Reset logic: If current_stored_value is not in the derived options, reset it
-        if f_def['widget_type'] == 'selectbox':
-            if current_stored_value not in options_list_for_widget:
-                current_stored_value = f_def['default_value']
-                st.session_state[current_filter_session_key] = current_stored_value # Persist reset
-            widget_index = options_list_for_widget.index(current_stored_value)
-            
-            with col_map[f_def['id']]: # Render in its mapped column
-                selected_value_from_widget = st.selectbox(
-                    f_def['label'],
-                    options=options_list_for_widget,
-                    key=current_filter_session_key, # Direct session state key
-                    index=widget_index
-                )
-
-        elif f_def['widget_type'] == 'multiselect':
-            valid_selections = [v for v in current_stored_value if v in options_list_for_widget]
-            if not valid_selections and f_def['default_value'] == ['All'] and 'All' in options_list_for_widget:
-                valid_selections = ['All']
-                st.session_state[current_filter_session_key] = ['All']
-            elif not valid_selections:
-                valid_selections = []
-                st.session_state[current_filter_session_key] = []
-            else: # Update session state to contain only valid selections
-                st.session_state[current_filter_session_key] = valid_selections
-
-            with col_map[f_def['id']]: # Render in its mapped column
-                selected_value_from_widget = st.multiselect(
-                    f_def['label'],
-                    options=options_list_for_widget,
-                    key=current_filter_session_key, # Direct session state key
-                    default=valid_selections # Multiselect uses default
-                )
-        
-        # Step 3: AFTER a filter's value has been determined/updated (selected_value_from_widget),
-        # apply it to `filtered_df_for_options_cascade` if it's a cascading filter.
-        # This will affect options for *its children* in subsequent loop iterations.
-        if f_def['id'] in ['domain_name', 'sub_domain_name', 'database', 'schema']: # Only these are parents in cascading chain
-            current_selection_for_filter = st.session_state[current_filter_session_key] # Get final value from session state
-            if current_selection_for_filter != 'All':
-                filtered_df_for_options_cascade = filtered_df_for_options_cascade[filtered_df_for_options_cascade[f_def['column_name']] == current_selection_for_filter]
-
-    # --- Render the independent radio button (Display Lag Times In) ---
-    radio_f_def = RADIO_FILTER_DEFINITION
-    current_radio_value = st.session_state[radio_f_def['id']]
-    radio_options_list = radio_f_def['options']
-    if current_radio_value not in radio_options_list:
-        current_radio_value = radio_f_def['default_value']
-        st.session_state[radio_f_def['id']] = current_radio_value
-    radio_index = radio_options_list.index(current_radio_value)
-
-    with col_map[radio_f_def['id']]:
-        st.radio(
-            radio_f_def['label'],
-            options=radio_options_list,
-            key=radio_f_def['id'],
-            index=radio_index,
-            horizontal=True
-        )
-
-    st.markdown("---")
-    st.info("These filters will be automatically applied as a first level of filtering on relevant dashboard tabs.", icon="ℹ️")
+    if key not in st.session_state:
+        st.session_state[key] = default_value
+    return st.session_state[key]
 
 
 def render_filter_canvas_tab():
     st.header("Global Filter Canvas")
     st.write("Set high-level filters here to apply across all relevant dashboard tabs. Each dashboard tab can apply further refinements.")
 
-    # IMPORTANT: Initialize session state for ALL global filter keys BEFORE render_dynamic_filters
-    if 'global_domain_name' not in st.session_state: st.session_state.global_domain_name = 'All'
-    if 'global_sub_domain_name' not in st.session_state: st.session_state.global_sub_domain_name = 'All'
-    if 'global_db_filter' not in st.session_state: st.session_state.global_db_filter = 'All'
-    if 'global_schema_filter' not in st.session_state: st.session_state.global_schema_filter = 'All'
-    if 'global_table_filter' not in st.session_state: st.session_state.global_table_filter = ['All']
-    if 'global_scheduling_state_filter' not in st.session_state: st.session_state.global_scheduling_state_filter = ['All']
-    if 'global_target_lag' not in st.session_state: st.session_state.global_target_lag = ['All']
-    if 'global_is_active_filter' not in st.session_state: st.session_state.global_is_active_filter = 'All'
-    if 'display_lag_times_in' not in st.session_state: st.session_state.display_lag_times_in = 'mixed'
+    # --- Initialize Session State for ALL Global Filters (redundant if in app_driver, but safe here) ---
+    # These explicit initializations ensure keys exist for `load_widget_state`.
+    # 'global_is_active_filter' is removed.
+    load_widget_state('global_domain_name', 'All')
+    load_widget_state('global_sub_domain_name', 'All')
+    load_widget_state('global_db_filter', 'All')
+    load_widget_state('global_schema_filter', 'All')
+    load_widget_state('global_table_filter', ['All'])
+    load_widget_state('global_scheduling_state_filter', ['All'])
+    load_widget_state('global_target_lag', ['All'])
+    load_widget_state('display_lag_times_in', 'mixed') # This is the global radio button for format
 
 
-    all_options_data = get_all_filter_options_data()
-    if all_options_data.empty:
+    all_options_df = get_all_filter_options_data()
+
+    if all_options_df.empty:
         st.info("No data available to populate filters. Please check the tracking table.", icon="ℹ️")
         return
 
     st.markdown("---")
     st.subheader("Master Filters")
 
-    # Call the dynamic filter renderer with the prefix "global_"
-    render_dynamic_filters(all_options_data, filter_prefix="global_")
+    # --- Initialize Column Layouts ---
+    cols_row1 = st.columns(4) # Domain, Subdomain, Database, Schema
+    cols_row2 = st.columns(4) # Table(s), Scheduling State, Target Lag, Display Lag Times In
+
+    # This DataFrame will be progressively filtered as we derive options for cascading widgets.
+    filtered_df_for_cascading_options = all_options_df.copy() 
+
+    # --- Row 1 Filters: Domain Name, Sub Domain Name, Database, Schema ---
+    # These are processed sequentially to update filtered_df_for_cascading_options for next step.
+
+    # 1. Domain Name Filter (Top-level parent)
+    with cols_row1[0]:
+        all_domains = ['All'] + sorted(filtered_df_for_cascading_options['DOMAIN_NAME'].unique().tolist())
+        current_domain_name = load_widget_state('global_domain_name', 'All')
+        if current_domain_name not in all_domains: # Reset if value is no longer valid
+            st.session_state.global_domain_name = 'All'
+            current_domain_name = 'All' # Use the reset value for current run
+        selected_domain_name = st.selectbox(
+            "Domain Name:",
+            options=all_domains,
+            key="global_domain_name", # Key directly links to session_state
+            index=all_domains.index(current_domain_name), # Pre-select
+            on_change=persist_widget_state, args=("global_domain_name",) # Optional: redundant but safe
+        )
+        if selected_domain_name != 'All': # Filter for next dropdown
+            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DOMAIN_NAME'] == selected_domain_name]
+
+    # 2. Sub Domain Name Filter (Depends on Domain)
+    with cols_row1[1]:
+        all_sub_domains = ['All'] + sorted(filtered_df_for_cascading_options['SUB_DOMAIN_NAME'].dropna().unique().tolist())
+        current_sub_domain_name = load_widget_state('global_sub_domain_name', 'All')
+        if current_sub_domain_name not in all_sub_domains: # Reset if invalid
+            st.session_state.global_sub_domain_name = 'All'
+            current_sub_domain_name = 'All'
+        selected_sub_domain_name = st.selectbox(
+            "Sub Domain Name:",
+            options=all_sub_domains,
+            key="global_sub_domain_name",
+            index=all_sub_domains.index(current_sub_domain_name),
+            on_change=persist_widget_state, args=("global_sub_domain_name",)
+        )
+        if selected_sub_domain_name != 'All': # Filter for next dropdown
+            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SUB_DOMAIN_NAME'] == selected_sub_domain_name]
+
+    # 3. Database Filter (Depends on Sub Domain)
+    with cols_row1[2]:
+        all_databases = ['All'] + sorted(filtered_df_for_cascading_options['DATABASE_NAME'].unique().tolist())
+        current_db_filter = load_widget_state('global_db_filter', 'All')
+        if current_db_filter not in all_databases: # Reset if invalid
+            st.session_state.global_db_filter = 'All'
+            current_db_filter = 'All'
+        selected_db_filter = st.selectbox(
+            "Database:",
+            options=all_databases,
+            key="global_db_filter",
+            index=all_databases.index(current_db_filter),
+            on_change=persist_widget_state, args=("global_db_filter",)
+        )
+        if selected_db_filter != 'All': # Filter for next dropdown
+            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['DATABASE_NAME'] == selected_db_filter]
+    
+    # 4. Schema Filter (Depends on Database)
+    with cols_row1[3]:
+        all_schemas = ['All'] + sorted(filtered_df_for_cascading_options['SCHEMA_NAME'].unique().tolist())
+        current_schema_filter = load_widget_state('global_schema_filter', 'All')
+        if current_schema_filter not in all_schemas: # Reset if invalid
+            st.session_state.global_schema_filter = 'All'
+            current_schema_filter = 'All'
+        selected_schema_filter = st.selectbox(
+            "Schema:",
+            options=all_schemas,
+            key="global_schema_filter",
+            index=all_schemas.index(current_schema_filter),
+            on_change=persist_widget_state, args=("global_schema_filter",)
+        )
+        # Filter for next dropdown (Table(s)) -- this uses selected_schema_filter
+        if selected_schema_filter != 'All':
+            filtered_df_for_cascading_options = filtered_df_for_cascading_options[filtered_df_for_cascading_options['SCHEMA_NAME'] == selected_schema_filter]
+
+
+    # --- Row 2 Filters: Table(s), Scheduling State(s), Target Lag (seconds), Display Lag Times In ---
+
+    # 5. Table(s) Filter (Depends on Schema)
+    with cols_row2[0]:
+        all_tables = ['All'] + sorted(filtered_df_for_cascading_options['TABLE_NAME'].unique().tolist())
+        current_table_filter = load_widget_state('global_table_filter', ['All'])
+        
+        # Reset if any selected table is no longer in valid options
+        valid_current_tables = [t for t in current_table_filter if t in all_tables]
+        if not valid_current_tables and 'All' in all_tables: # If no valid selections left, default to ['All']
+             st.session_state.global_table_filter = ['All']
+             current_table_filter = ['All']
+        elif not valid_current_tables: # If no valid selections left and 'All' not in options
+             st.session_state.global_table_filter = []
+             current_table_filter = []
+        else:
+             st.session_state.global_table_filter = valid_current_tables # Update with valid selections
+
+        selected_table_filter = st.multiselect(
+            "Table(s):",
+            options=all_tables,
+            key="global_table_filter",
+            default=current_table_filter,
+            on_change=persist_widget_state, args=("global_table_filter",)
+        )
+
+    # 6. Scheduling State(s) Filter (Independent of Domain/DB cascade)
+    with cols_row2[1]:
+        all_scheduling_states = ['All'] + sorted(all_options_df['SCHEDULING_STATE_STATUS'].unique().tolist())
+        current_scheduling_state_filter = load_widget_state('global_scheduling_state_filter', ['All'])
+        valid_current_sched_states = [s for s in current_scheduling_state_filter if s in all_scheduling_states]
+        if not valid_current_sched_states and 'All' in all_scheduling_states:
+             st.session_state.global_scheduling_state_filter = ['All']
+             current_scheduling_state_filter = ['All']
+        selected_sched_state_filter = st.multiselect(
+            "Scheduling State(s):",
+            options=all_scheduling_states,
+            key="global_scheduling_state_filter",
+            default=current_scheduling_state_filter,
+            on_change=persist_widget_state, args=("global_scheduling_state_filter",)
+        )
+
+    # 7. Target Lag (seconds) Filter (Independent)
+    with cols_row2[2]:
+        all_target_lags_formatted = ['All'] + sorted(all_options_df['TARGET_LAG_SEC_FMT'].dropna().unique().tolist())
+        current_target_lag_filter = load_widget_state('global_target_lag', ['All'])
+        valid_current_target_lags = [l for l in current_target_lag_filter if l in all_target_lags_formatted]
+        if not valid_current_target_lags and 'All' in all_target_lags_formatted:
+             st.session_state.global_target_lag = ['All']
+             current_target_lag_filter = ['All']
+        selected_target_lag_filter = st.multiselect(
+            "Target Lag (seconds):",
+            options=all_target_lags_formatted,
+            key="global_target_lag",
+            default=current_target_lag_filter,
+            on_change=persist_widget_state, args=("global_target_lag",)
+        )
+
+    # 8. Display Lag Times In (Radio)
+    with cols_row2[3]:
+        all_time_formats = ["mixed", "seconds", "minutes", "hours", "days"]
+        current_display_lag_times_in = load_widget_state('display_lag_times_in', 'mixed')
+        if current_display_lag_times_in not in all_time_formats:
+            st.session_state.display_lag_times_in = 'mixed'
+            current_display_lag_times_in = 'mixed'
+        selected_time_format = st.radio(
+            "Display Lag Times In:",
+            options=all_time_formats,
+            key="display_lag_times_in",
+            index=all_time_formats.index(current_display_lag_times_in),
+            horizontal=True,
+            on_change=persist_widget_state, args=("display_lag_times_in",)
+        )
+    
+    st.markdown("---")
+    st.info("These filters will be automatically applied as a first level of filtering on relevant dashboard tabs.", icon="ℹ️")
 
 # End of tabs/filter_canvas.py
