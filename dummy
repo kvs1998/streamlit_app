@@ -1,65 +1,56 @@
-# app_driver.py (Your main entry point file)
-import streamlit as st
-from snowflake.snowpark import Session # Assuming this is your session class
+# --- Table(s) Filter (Depends on Schema) ---
+with filter_cols_row2[0]: # Assuming this is the Table(s) column
+    disable_widget = False # Default to not disabled
 
-# Import your tabs
-import tabs.dt_health_tab as dt_health_tab
-import tabs.driver_logs_tab as driver_logs_tab
-import tabs.dt_history_tab as dt_history_tab
-import tabs.mail_notification_tab as mail_notification_tab
-import tabs.overview_tab as overview_tab
-import tabs.filter_canvas as filter_canvas_tab # Ensure this is imported
+    # 1. Determine the actual unique table names available based on the parent filters
+    actual_available_tables_from_df = sorted(current_options_for_cascading['TABLE_NAME'].unique().tolist())
+    
+    # 2. Determine the list of options to display in the multiselect:
+    # If there are NO actual tables, the options should just be an empty list, or ['All']
+    if len(actual_available_tables_from_df) == 0:
+        all_tables_options_for_widget = [] # No tables available, so no options
+        disable_widget = True # Disable the widget if no tables found
+        # Also reset the session state for this filter if it's currently holding invalid values
+        current_stored_table_filter_value = load_widget_state('canvas_table_filter', ['All'])
+        if current_stored_table_filter_value != ['All'] and current_stored_table_filter_value != []:
+            # Only reset if it's not already 'All' or empty
+            change_widget_state('canvas_table_filter', ['All']) # Programmatically reset to 'All'
+    else:
+        # If tables are available, options are 'All' + sorted list
+        all_tables_options_for_widget = ['All'] + actual_available_tables_from_df
 
-# --- Global Session Management (Crucial for Caching & Persistence) ---
-@st.cache_resource
-def get_snowflake_session_cached():
-    # Replace with your actual Snowflake connection details from st.secrets
-    return Session.builder.configs(st.secrets["snowflake"]).create()
+    # 3. Load the persisted state for tables filter
+    current_stored_table_filter_value = load_widget_state('canvas_table_filter', ['All'])
 
-if 'get_snowflake_session' not in st.session_state:
-    st.session_state.get_snowflake_session = get_snowflake_session_cached
+    # 4. Filter previously selected tables to ensure they are still valid options
+    valid_selected_tables = [table for table in current_stored_table_filter_value if table in all_tables_options_for_widget]
+    
+    # If the widget should be disabled (no options) but the state is not already empty/All,
+    # or if previous selections are no longer valid, explicitly reset the state using change_widget_state.
+    if disable_widget or len(valid_selected_tables) != len(current_stored_table_filter_value):
+        if 'All' in all_tables_options_for_widget: # If 'All' is an available option
+            change_widget_state('canvas_table_filter', ['All'])
+        else: # If no options are available (widget disabled) and 'All' isn't an option
+            change_widget_state('canvas_table_filter', []) # Set to empty list
+    
+    # Fetch the value for default after potential reset
+    tables_to_preselect = load_widget_state('canvas_table_filter', ['All']) # Re-load after potential change_widget_state call
 
-
-# --- Initialize ALL Global Filter States (Crucial: Define ONCE at app start) ---
-# These keys are read by filter_canvas.py and dt_health_tab.py
-if 'global_domain_name' not in st.session_state: st.session_state.global_domain_name = 'All'
-if 'global_sub_domain_name' not in st.session_state: st.session_state.global_sub_domain_name = 'All'
-if 'global_db_filter' not in st.session_state: st.session_state.global_db_filter = 'All'
-if 'global_schema_filter' not in st.session_state: st.session_state.global_schema_filter = 'All'
-if 'global_table_filter' not in st.session_state: st.session_state.global_table_filter = ['All']
-if 'global_scheduling_state_filter' not in st.session_state: st.session_state.global_scheduling_state_filter = ['All']
-if 'global_target_lag' not in st.session_state: st.session_state.global_target_lag = ['All']
-if 'global_is_active_filter' not in st.session_state: st.session_state.global_is_active_filter = 'All'
-if 'display_lag_times_in' not in st.session_state: st.session_state.display_lag_times_in = 'mixed' # This is treated as a global filter
-
-
-# --- Initialize ALL Local Filter States (for each tab that has them) ---
-# dt_health_tab.py local filters (use 'dt_health_tab_' prefix)
-if 'dt_health_tab_domain_name' not in st.session_state: st.session_state.dt_health_tab_domain_name = 'All'
-if 'dt_health_tab_sub_domain_name' not in st.session_state: st.session_state.dt_health_tab_sub_domain_name = 'All'
-if 'dt_health_tab_db_filter' not in st.session_state: st.session_state.dt_health_tab_db_filter = 'All'
-if 'dt_health_tab_schema_filter' not in st.session_state: st.session_state.dt_health_tab_schema_filter = 'All'
-if 'dt_health_tab_table_filter' not in st.session_state: st.session_state.dt_health_tab_table_filter = ['All']
-if 'dt_health_tab_scheduling_state_filter' not in st.session_state: st.session_state.dt_health_tab_scheduling_state_filter = ['All']
-if 'dt_health_tab_target_lag' not in st.session_state: st.session_state.dt_health_tab_target_lag = ['All']
-if 'dt_health_tab_display_lag_times_in' not in st.session_state: st.session_state.dt_health_tab_display_lag_times_in = 'mixed'
-
-# Add initializations for other tabs here if they have local filters
-# e.g., if 'dt_history_tab_db_filter' not in st.session_state: st.session_state.dt_history_tab_db_filter = 'All'
-
-
-# --- Page Navigation ---
-selected_tab = st.sidebar.radio("Navigation", ["Dashboard", "Filter Canvas", "Historical Loads", "Notifications", "Driver Logs", "Overview Tab"], index=0)
-
-if selected_tab == "Dashboard":
-    dt_health_tab.render_dt_health_tab() # This will use global filters from session_state
-elif selected_tab == "Filter Canvas":
-    filter_canvas_tab.render_filter_canvas_tab() # This will also initialize its own widgets using st.session_state
-elif selected_tab == "Historical Loads":
-    dt_history_tab.render_dt_history_tab()
-elif selected_tab == "Notifications":
-    mail_notification_tab.render_mail_notification_tab()
-elif selected_tab == "Driver Logs":
-    driver_logs_tab.render_driver_logs_tab()
-elif selected_tab == "Overview Tab":
-    overview_tab.render_overview_tab()
+    selected_tables = st.multiselect(
+        "Table(s):",
+        options=all_tables_options_for_widget, # Use the correctly derived options list
+        key="_canvas_table_filter", # Dummy key for persistence
+        default=tables_to_preselect, # Default to the validated list from session state
+        on_change=persist_widget_state, # Calls your persist_widget_state
+        args=("canvas_table_filter",), # Arguments for persist_widget_state
+        disabled=disable_widget # Apply disable property
+    )
+    
+    # Update current_options_for_cascading for children (if tables had children filters)
+    # This block is common after multiselect and should be handled by your outer loop's flow.
+    # The returned 'selected_tables' is what will be used in your overall filtering logic.
+    if 'All' not in selected_tables:
+        # This line is about applying the filter for *subsequent* filters in the pipeline,
+        # not about deriving options for the current widget.
+        # This should live outside the widget definition block in the main rendering loop.
+        current_options_for_cascading = current_options_for_cascading[current_options_for_cascading['TABLE_NAME'].isin(selected_tables)]
