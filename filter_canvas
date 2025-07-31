@@ -2,161 +2,297 @@ import streamlit as st
 import pandas as pd
 # Assuming you have init_connection and run_query functions defined
 # from the previous comprehensive example, and secrets.toml is set up.
+# You will need to replace the dummy_df_tables with an actual call to run_query
+# for your full table list.
 
-# Dummy data for demonstration (simulating results from Snowflake query)
-data = {
-    'DOMAIN_NAME': ['EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'EFRONT'],
-    'SUB_DOMAIN_NAME': ['REF', 'REF', 'REF', 'REF', 'REF', 'REF', 'REF', 'REF', 'REF'],
-    'DATABASE_NAME': ['EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB', 'EDP_ADC_SDM_DB'],
-    'SCHEMA_NAME': ['ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT', 'ADC_SDM_EFRONT'],
-    'TABLE_NAME': [
-        'T_REF_EFRONT_BENCHMARK',
-        'T_REF_EFRONT_BENCHMARK_EXT',
-        'T_REF_EFRONT_BUSINESS_RISK',
-        'T_REF_EFRONT_CLASSIFICATION',
-        'T_REF_EFRONT_COMPANY',
-        'T_REF_EFRONT_COMPANY_EXT',
-        'T_REF_EFRONT_CORPORATE_CLASS',
-        'T_REF_EFRONT_COUNTRY',
-        'T_REF_EFRONT_DEAL_INSTRUMENT'
-    ],
-    'SCHEDULING_STATE_STATUS': ['SUCCESS'] * 9,
-    'TARGET_LAG_SEC_FMT': ['120s'] * 9
-}
-df_tables = pd.DataFrame(data)
-
+# Set a wider layout
 st.set_page_config(layout="wide", page_title="Snowflake Table Action Selector")
-st.title("❄️ Snowflake Table Action Selector")
 
+# --- Initialize session state for selections and filtered data ---
+# This is crucial for maintaining selection state across filter changes
+if 'selected_snapshot_tables' not in st.session_state:
+    st.session_state.selected_snapshot_tables = set() # Store unique identifiers
+if 'selected_refresh_history_tables' not in st.session_state:
+    st.session_state.selected_refresh_history_tables = set()
+if 'full_tables_data' not in st.session_state:
+    # This will hold the ENTIRE list of tables fetched from Snowflake once
+    # This is more efficient than re-fetching all 600+ tables on every filter change
+    st.session_state.full_tables_data = pd.DataFrame() # Will be populated on initial load
+if 'filtered_tables_for_display' not in st.session_state:
+    # This will hold the subset of tables currently matching the master filters
+    st.session_state.filtered_tables_for_display = pd.DataFrame()
+
+
+# --- Dummy Data (Replace with your actual Snowflake fetch logic) ---
+# Simulating the master table list from Snowflake
+@st.cache_data(ttl=3600) # Cache the full table list for an hour
+def load_all_tables_from_snowflake():
+    # This function would call run_query(your_query_to_get_all_tables_metadata)
+    # For now, using a larger dummy dataset to simulate 600+ tables
+    dummy_data = {
+        'DOMAIN_NAME': ['EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'FINANCE', 'FINANCE', 'MKT', 'MKT'] * 100, # Simulate 800 tables
+        'SUB_DOMAIN_NAME': ['REF', 'REF', 'MKT', 'MKT', 'ACCT', 'TRX', 'CAMP', 'LEAD'] * 100,
+        'DATABASE_NAME': ['EDP_ADC_SDM_DB'] * 800,
+        'SCHEMA_NAME': [f'ADC_SDM_EFRONT_{i//200}' for i in range(800)], # Simulate varied schemas
+        'TABLE_NAME': [f'T_REF_TABLE_{i:04d}' for i in range(800)],
+        'SCHEDULING_STATE_STATUS': ['SUCCESS', 'RUNNING', 'FAILED', 'SUCCESS'] * 200,
+        'TARGET_LAG_SEC': [120, 300, 60, 900] * 200,
+        'TARGET_LAG_SEC_FMT': [f'{v}s' for v in ([120, 300, 60, 900] * 200)]
+    }
+    df = pd.DataFrame(dummy_data)
+    # Add a unique identifier for each row, crucial for persistent selection
+    df['FULL_TABLE_IDENTIFIER'] = df['DATABASE_NAME'] + '.' + df['SCHEMA_NAME'] + '.' + df['TABLE_NAME']
+    return df
+
+if st.session_state.full_tables_data.empty:
+    with st.spinner("Loading all table metadata from Snowflake..."):
+        st.session_state.full_tables_data = load_all_tables_from_snowflake()
+
+st.title("❄️ Snowflake Table Action Selector")
 st.info(
     "These filters will be automatically applied as a first level of filtering "
     "on relevant dashboard tabs."
 )
 
-# --- Initialize new selection columns in DataFrame ---
-if 'SNAPSHOT_SELECT' not in df_tables.columns:
-    df_tables['SNAPSHOT_SELECT'] = False
-if 'REFRESH_HISTORY_SELECT' not in df_tables.columns:
-    df_tables['REFRESH_HISTORY_SELECT'] = False
+st.header("Master Filters")
 
-# --- Filters Section (Sidebar - simplified for this example) ---
-st.sidebar.header("Filter Tables (Pre-selection)")
-# For this demo, we'll use a session state variable to mimic a filtered DataFrame
-# In your actual app, this would be populated by the 'Apply Filters / Load Tables' button.
-if 'filtered_tables' not in st.session_state:
-    st.session_state['filtered_tables'] = df_tables.copy() # Load initial dummy data
+# --- Filter Widgets (Moved to Streamlit's main area to match screenshot) ---
+# Create columns for better layout of filters
+filter_cols_1 = st.columns(4)
+filter_cols_2 = st.columns(4)
+filter_cols_3 = st.columns(4)
+
+# Example: Domain Name (Dropdown)
+with filter_cols_1[0]:
+    all_domain_names = ['All'] + sorted(st.session_state.full_tables_data['DOMAIN_NAME'].unique().tolist())
+    selected_domain = st.selectbox("Domain Name:", options=all_domain_names, key="domain_filter")
+
+# Example: Sub Domain Name (Dropdown with specific default 'MKT')
+with filter_cols_1[1]:
+    all_sub_domain_names = ['All'] + sorted(st.session_state.full_tables_data['SUB_DOMAIN_NAME'].unique().tolist())
+    selected_sub_domain = st.selectbox("Sub Domain Name:", options=all_sub_domain_names, index=all_sub_domain_names.index('MKT') if 'MKT' in all_sub_domain_names else 0, key="subdomain_filter")
+
+# Example: Database (Dropdown)
+with filter_cols_1[2]:
+    all_databases = ['All'] + sorted(st.session_state.full_tables_data['DATABASE_NAME'].unique().tolist())
+    selected_database = st.selectbox("Database:", options=all_databases, key="database_filter")
+
+# Example: Schema (Dropdown)
+with filter_cols_1[3]:
+    # Schemas depend on selected database, so filter options dynamically
+    available_schemas = st.session_state.full_tables_data['SCHEMA_NAME'].unique().tolist()
+    if selected_database != 'All':
+        available_schemas = st.session_state.full_tables_data[st.session_state.full_tables_data['DATABASE_NAME'] == selected_database]['SCHEMA_NAME'].unique().tolist()
+    all_schemas_filtered = ['All'] + sorted(available_schemas)
+    selected_schema = st.selectbox("Schema:", options=all_schemas_filtered, key="schema_filter")
+
+
+# Example: Table(s) (Multiselect with search)
+with filter_cols_2[0]:
+    # Populate based on current filters, so users can select from visible subset
+    current_filtered_table_names = sorted(st.session_state.full_tables_data['TABLE_NAME'].unique().tolist()) # Start with all for this widget
+    selected_tables_filter = st.multiselect("Table(s):", options=current_filtered_table_names, default=[], key="tables_filter")
+
+# Example: Scheduling State(s) (Multiselect)
+with filter_cols_2[1]:
+    all_scheduling_states = ['All'] + sorted(st.session_state.full_tables_data['SCHEDULING_STATE_STATUS'].unique().tolist())
+    selected_scheduling_states = st.multiselect("Scheduling State(s):", options=all_scheduling_states, default=['All'], key="scheduling_filter")
+
+# Example: Target Lag (seconds) (Multiselect or Slider)
+with filter_cols_2[2]:
+    all_target_lags = ['All'] + sorted(st.session_state.full_tables_data['TARGET_LAG_SEC'].unique().tolist())
+    selected_target_lags = st.multiselect("Target Lag (seconds):", options=all_target_lags, default=['All'], key="lag_filter")
+
+# Example: Display Lag Times In (Radio Buttons)
+with filter_cols_2[3]:
+    st.markdown("Display Lag Times In:")
+    selected_lag_display_unit = st.radio(
+        "Lag Unit",
+        options=["mixed", "seconds", "minutes", "hours", "days"],
+        index=1, # Default to seconds
+        label_visibility="collapsed", # Hide the default label for compactness
+        key="lag_unit_radio"
+    )
+
+# --- Apply Filters Button (Crucial for performance) ---
+st.markdown("---")
+# Use a form to encapsulate filters and the apply button for clearer state management
+with st.form("master_filter_form"):
+    st.info("Applying filters will update the table list below and maintain current selections.")
+    apply_filters_button = st.form_submit_button("Apply Master Filters")
+
+
+# --- Filter Logic for the Main DataFrame ---
+if apply_filters_button or st.session_state.full_tables_data.empty: # Apply filters on load or button click
+    filtered_df = st.session_state.full_tables_data.copy()
+
+    # Apply Domain filter
+    if selected_domain != 'All':
+        filtered_df = filtered_df[filtered_df['DOMAIN_NAME'] == selected_domain]
+
+    # Apply Sub Domain filter
+    if selected_sub_domain != 'All':
+        filtered_df = filtered_df[filtered_df['SUB_DOMAIN_NAME'] == selected_sub_domain]
+
+    # Apply Database filter
+    if selected_database != 'All':
+        filtered_df = filtered_df[filtered_df['DATABASE_NAME'] == selected_database]
+
+    # Apply Schema filter
+    if selected_schema != 'All':
+        filtered_df = filtered_df[filtered_df['SCHEMA_NAME'] == selected_schema]
+
+    # Apply Table(s) filter (if specific tables are chosen)
+    if selected_tables_filter: # Check if the list is not empty
+        filtered_df = filtered_df[filtered_df['TABLE_NAME'].isin(selected_tables_filter)]
+
+    # Apply Scheduling State(s) filter
+    if 'All' not in selected_scheduling_states:
+        filtered_df = filtered_df[filtered_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_states)]
+
+    # Apply Target Lag (seconds) filter
+    if 'All' not in selected_target_lags:
+        filtered_df = filtered_df[filtered_df['TARGET_LAG_SEC'].isin(selected_target_lags)]
+
+
+    # --- Initialize selection columns for the currently filtered_df ---
+    # These will reflect the global persistent selection state
+    filtered_df['SNAPSHOT_SELECT'] = filtered_df['FULL_TABLE_IDENTIFIER'].apply(
+        lambda x: x in st.session_state.selected_snapshot_tables
+    )
+    filtered_df['REFRESH_HISTORY_SELECT'] = filtered_df['FULL_TABLE_IDENTIFIER'].apply(
+        lambda x: x in st.session_state.selected_refresh_history_tables
+    )
+
+    st.session_state.filtered_tables_for_display = filtered_df.reset_index(drop=True) # Reset index for data_editor
+
+
+st.markdown("---") # Visual separator
+
+# --- Display and Select Tables ---
+current_filtered_tables_count = len(st.session_state.filtered_tables_for_display)
 
 st.subheader(
-    f"Select Tables for Actions ({len(st.session_state['filtered_tables'])} total)"
+    f"Select Tables for Actions ({current_filtered_tables_count} total)"
 )
 
-# Define column configurations for st.data_editor
-column_configurations = {
-    "SNAPSHOT_SELECT": st.column_config.CheckboxColumn(
-        "Take Snapshot",
-        help="Check to take a snapshot of this table",
-        default=False,
-        disabled=False
-    ),
-    "REFRESH_HISTORY_SELECT": st.column_config.CheckboxColumn(
-        "Refresh History",
-        help="Check to refresh history for this table",
-        default=False,
-        disabled=False
-    ),
-    "DOMAIN_NAME": st.column_config.TextColumn("Domain", disabled=True),
-    "SUB_DOMAIN_NAME": st.column_config.TextColumn("Sub-Domain", disabled=True),
-    "DATABASE_NAME": st.column_config.TextColumn("Database", disabled=True),
-    "SCHEMA_NAME": st.column_config.TextColumn("Schema", disabled=True),
-    "TABLE_NAME": st.column_config.TextColumn("Table Name", disabled=True),
-    "SCHEDULING_STATE_STATUS": st.column_config.TextColumn("Status", disabled=True),
-    "TARGET_LAG_SEC_FMT": st.column_config.TextColumn("Lag", disabled=True),
-}
+if not st.session_state.filtered_tables_for_display.empty:
+    # Define column configurations for st.data_editor
+    column_configurations = {
+        "SNAPSHOT_SELECT": st.column_config.CheckboxColumn(
+            "Take Snap",
+            help="Check to take a snapshot of this table",
+            default=False,
+            disabled=False
+        ),
+        "REFRESH_HISTORY_SELECT": st.column_config.CheckboxColumn(
+            "Refresh Hist",
+            help="Check to refresh history for this table",
+            default=False,
+            disabled=False
+        ),
+        # Display Data Columns - all read-only
+        "DOMAIN_NAME": st.column_config.TextColumn("Domain", disabled=True),
+        "SUB_DOMAIN_NAME": st.column_config.TextColumn("Sub-Domain", disabled=True),
+        "DATABASE_NAME": st.column_config.TextColumn("Database", disabled=True),
+        "SCHEMA_NAME": st.column_config.TextColumn("Schema", disabled=True),
+        "TABLE_NAME": st.column_config.TextColumn("Table Name", disabled=True),
+        "SCHEDULING_STATE_STATUS": st.column_config.TextColumn("Status", disabled=True),
+        "TARGET_LAG_SEC_FMT": st.column_config.TextColumn("Lag", disabled=True),
+        # Hide the internal FULL_TABLE_IDENTIFIER column
+        "FULL_TABLE_IDENTIFIER": st.column_config.TextColumn(disabled=True, width="HIDDEN")
+    }
 
-# Define the order of columns explicitly
-display_columns_order = [
-    "SNAPSHOT_SELECT",
-    "REFRESH_HISTORY_SELECT",
-    "DOMAIN_NAME",
-    "SUB_DOMAIN_NAME",
-    "DATABASE_NAME",
-    "SCHEMA_NAME",
-    "TABLE_NAME",
-    "SCHEDULING_STATE_STATUS",
-    "TARGET_LAG_SEC_FMT"
-]
+    # Define the order of columns explicitly (match your screenshot)
+    display_columns_order = [
+        "SNAPSHOT_SELECT",
+        "REFRESH_HISTORY_SELECT",
+        "DOMAIN_NAME",
+        "SUB_DOMAIN_NAME",
+        "DATABASE_NAME",
+        "SCHEMA_NAME",
+        "TABLE_NAME",
+        "SCHEDULING_STATE_STATUS",
+        "TARGET_LAG_SEC_FMT"
+    ]
 
-# Use the DataFrame from session state for the editor
-edited_df = st.data_editor(
-    st.session_state['filtered_tables'][display_columns_order],
-    column_config=column_configurations,
-    hide_index=True,
-    use_container_width=True,
-    key="table_action_editor"
-)
+    edited_df = st.data_editor(
+        st.session_state.filtered_tables_for_display[display_columns_order], # Ensure only relevant columns are passed
+        column_config=column_configurations,
+        hide_index=True,
+        use_container_width=True,
+        key="live_table_editor" # New key for the editor to ensure it properly re-renders
+    )
 
-# Update the session state DataFrame with the edits
-st.session_state['filtered_tables'] = edited_df
+    # --- Update the global persistent selection state ---
+    # Iterate through the edited DataFrame to update selected sets
+    # This must be done on the FULL_TABLE_IDENTIFIER
+    for index, row in edited_df.iterrows():
+        table_id = st.session_state.filtered_tables_for_display.loc[index, 'FULL_TABLE_IDENTIFIER']
+        # Handle Snapshot selection
+        if row['SNAPSHOT_SELECT']:
+            st.session_state.selected_snapshot_tables.add(table_id)
+        else:
+            if table_id in st.session_state.selected_snapshot_tables:
+                st.session_state.selected_snapshot_tables.remove(table_id)
 
-# --- Process Selections ---
-# Calculate total number of tables in the *filtered* view
-total_filtered_tables = len(st.session_state['filtered_tables'])
+        # Handle Refresh History selection
+        if row['REFRESH_HISTORY_SELECT']:
+            st.session_state.selected_refresh_history_tables.add(table_id)
+        else:
+            if table_id in st.session_state.selected_refresh_history_tables:
+                st.session_state.selected_refresh_history_tables.remove(table_id)
 
-# Find tables selected for Snapshot
-snapshot_selected_df = edited_df[edited_df['SNAPSHOT_SELECT'] == True]
-num_snapshot_selected = len(snapshot_selected_df)
+    # Re-calculate currently displayed selected counts
+    num_snapshot_selected_in_view = len(edited_df[edited_df['SNAPSHOT_SELECT'] == True])
+    num_refresh_history_selected_in_view = len(edited_df[edited_df['REFRESH_HISTORY_SELECT'] == True])
 
-# Find tables selected for Refresh History
-refresh_history_selected_df = edited_df[edited_df['REFRESH_HISTORY_SELECT'] == True]
-num_refresh_history_selected = len(refresh_history_selected_df)
+    # Display selections and prepare for actions (using counts *from the view*)
+    if num_snapshot_selected_in_view > 0 or num_refresh_history_selected_in_view > 0:
+        st.markdown("---")
+        st.subheader("Currently Selected in View:")
 
-# Display selections and prepare for actions
-if num_snapshot_selected > 0 or num_refresh_history_selected > 0:
-    st.markdown("---")
-    st.subheader("Selected Tables for Action:")
+        if num_snapshot_selected_in_view > 0:
+            st.write(
+                f"Tables selected for **Snapshot** ({num_snapshot_selected_in_view} out of {current_filtered_tables_count}):"
+            )
+            # Display these from the `edited_df` to ensure they are the ones actually checked
+            st.dataframe(
+                edited_df[edited_df['SNAPSHOT_SELECT'] == True][['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME']],
+                hide_index=True
+            )
 
-    if num_snapshot_selected > 0:
-        st.write(
-            f"Tables selected for **Snapshot** ({num_snapshot_selected} out of {total_filtered_tables}):"
-        )
-        st.dataframe(
-            snapshot_selected_df[['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME']],
-            hide_index=True
-        )
-        snapshot_tables_full_names = [
-            f'"{row["DATABASE_NAME"]}"."{row["SCHEMA_NAME"]}"."{row["TABLE_NAME"]}"'
-            for index, row in snapshot_selected_df.iterrows()
-        ]
-        st.code(snapshot_tables_full_names)
+        if num_refresh_history_selected_in_view > 0:
+            st.write(
+                f"Tables selected for **Refresh History** ({num_refresh_history_selected_in_view} out of {current_filtered_tables_count}):"
+            )
+            st.dataframe(
+                edited_df[edited_df['REFRESH_HISTORY_SELECT'] == True][['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME']],
+                hide_index=True
+            )
 
-    if num_refresh_history_selected > 0:
-        st.write(
-            f"Tables selected for **Refresh History** ({num_refresh_history_selected} out of {total_filtered_tables}):"
-        )
-        st.dataframe(
-            refresh_history_selected_df[['DATABASE_NAME', 'SCHEMA_NAME', 'TABLE_NAME']],
-            hide_index=True
-        )
-        refresh_history_tables_full_names = [
-            f'"{row["DATABASE_NAME"]}"."{row["SCHEMA_NAME"]}"."{row["TABLE_NAME"]}"'
-            for index, row in refresh_history_selected_df.iterrows()
-        ]
-        st.code(refresh_history_tables_full_names)
-
-    # --- Action Buttons ---
+    # --- Action Buttons (Now referring to the GLOBAL persistent selection state) ---
     st.markdown("---")
     col_action1, col_action2 = st.columns(2)
 
     with col_action1:
-        if st.button("Execute Snapshot Action", disabled=(num_snapshot_selected == 0)):
-            st.success(f"Initiating Snapshot for {num_snapshot_selected} tables.")
+        # Action button uses the count from the GLOBAL selection state
+        if st.button(f"Execute Snapshot Action ({len(st.session_state.selected_snapshot_tables)} total selected)",
+                     disabled=(len(st.session_state.selected_snapshot_tables) == 0)):
+            st.success(f"Initiating Snapshot for {len(st.session_state.selected_snapshot_tables)} tables (globally selected):")
+            st.code(list(st.session_state.selected_snapshot_tables)) # Show what's being acted upon
 
     with col_action2:
-        if st.button("Execute Refresh History Action", disabled=(num_refresh_history_selected == 0)):
-            st.success(f"Initiating Refresh History for {num_refresh_history_selected} tables.")
+        # Action button uses the count from the GLOBAL selection state
+        if st.button(f"Execute Refresh History Action ({len(st.session_state.selected_refresh_history_tables)} total selected)",
+                     disabled=(len(st.session_state.selected_refresh_history_tables) == 0)):
+            st.success(f"Initiating Refresh History for {len(st.session_state.selected_refresh_history_tables)} tables (globally selected):")
+            st.code(list(st.session_state.selected_refresh_history_tables)) # Show what's being acted upon
 
+    st.write(f"Global Snapshot Selections: {len(st.session_state.selected_snapshot_tables)}")
+    st.write(f"Global Refresh History Selections: {len(st.session_state.selected_refresh_history_tables)}") # For debugging/verification
 else:
-    st.info("Select tables using the 'Take Snapshot' or 'Refresh History' checkboxes.")
+    st.info("No tables to display. Adjust filters or ensure tables exist.")
 
 st.markdown("---")
 st.markdown("Developed by T3 Chat for Data Engineers 🤖")
