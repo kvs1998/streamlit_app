@@ -3,13 +3,13 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 # --- Dummy Data (Replace with your actual Snowflake fetch logic) ---
-@st.cache_data(ttl=3600) # Cache the full table list for an hour
+@st.cache_data(ttl=3600)
 def load_all_tables_from_snowflake():
     dummy_data = {
-        'DOMAIN_NAME': ['EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'FINANCE', 'FINANCE', 'MKT', 'MKT'] * 100, # Simulate 800 tables
+        'DOMAIN_NAME': ['EFRONT', 'EFRONT', 'EFRONT', 'EFRONT', 'FINANCE', 'FINANCE', 'MKT', 'MKT'] * 100,
         'SUB_DOMAIN_NAME': ['REF', 'REF', 'MKT', 'MKT', 'ACCT', 'TRX', 'CAMP', 'LEAD'] * 100,
         'DATABASE_NAME': ['EDP_ADC_SDM_DB'] * 800,
-        'SCHEMA_NAME': [f'ADC_SDM_EFRONT_{i//200}' for i in range(800)], # Simulate varied schemas
+        'SCHEMA_NAME': [f'ADC_SDM_EFRONT_{i//200}' for i in range(800)],
         'TABLE_NAME': [f'T_REF_TABLE_{i:04d}' for i in range(800)],
         'SCHEDULING_STATE_STATUS': ['SUCCESS', 'RUNNING', 'FAILED', 'SUCCESS'] * 200,
         'TARGET_LAG_SEC': [120, 300, 60, 900] * 200,
@@ -22,15 +22,27 @@ def load_all_tables_from_snowflake():
 # --- Configuration & Initialization ---
 st.set_page_config(layout="wide", page_title="Snowflake Table Action Selector")
 
+# Global persistent selection sets
 if 'selected_snapshot_tables' not in st.session_state:
-    st.session_state.selected_snapshot_tables = set() # Store unique identifiers for global selection
+    st.session_state.selected_snapshot_tables = set()
 if 'selected_refresh_history_tables' not in st.session_state:
     st.session_state.selected_refresh_history_tables = set()
+
+# Master data source (only load once)
 if 'full_tables_data' not in st.session_state:
     st.session_state.full_tables_data = pd.DataFrame()
-# `filtered_tables_for_display` will now be updated on every relevant filter change
-# `current_edited_df_state` will always be a copy of `filtered_tables_for_display`
-# passed to data_editor, and updated by data_editor's internal state.
+    with st.spinner("Loading all table metadata from Snowflake..."):
+        st.session_state.full_tables_data = load_all_tables_from_snowflake()
+
+# Flags for select all actions (reset on each full rerun, handled within fragment now)
+if 'do_select_all_snap_frag' not in st.session_state:
+    st.session_state.do_select_all_snap_frag = None # None, True, or False
+if 'do_select_all_refresh_frag' not in st.session_state:
+    st.session_state.do_select_all_refresh_frag = None # None, True, or False
+
+# This will be the filtered data that the fragment receives to display
+if 'filtered_tables_for_display_frag' not in st.session_state:
+    st.session_state.filtered_tables_for_display_frag = pd.DataFrame()
 
 
 st.title("❄️ Snowflake Table Action Selector")
@@ -41,29 +53,21 @@ st.info(
 
 st.header("Master Filters")
 
-# --- Load all tables only once ---
-if st.session_state.full_tables_data.empty:
-    with st.spinner("Loading all table metadata from Snowflake..."):
-        st.session_state.full_tables_data = load_all_tables_from_snowflake()
-
-# --- Filter Widgets ---
+# --- Filter Widgets (unchanged from previous version) ---
 filter_cols_1 = st.columns(4)
 filter_cols_2 = st.columns(4)
-filter_cols_3 = st.columns(4) # Assuming this is intended for future filters or layout
+filter_cols_3 = st.columns(4)
 
 with filter_cols_1[0]:
     all_domain_names = ['All'] + sorted(st.session_state.full_tables_data['DOMAIN_NAME'].unique().tolist())
-    # Default to 'All'
     selected_domain = st.selectbox("Domain Name:", options=all_domain_names, index=0, key="domain_filter")
 
 with filter_cols_1[1]:
     all_sub_domain_names = ['All'] + sorted(st.session_state.full_tables_data['SUB_DOMAIN_NAME'].unique().tolist())
-    # Default to 'All'
     selected_sub_domain = st.selectbox("Sub Domain Name:", options=all_sub_domain_names, index=0, key="subdomain_filter")
 
 with filter_cols_1[2]:
     all_databases = ['All'] + sorted(st.session_state.full_tables_data['DATABASE_NAME'].unique().tolist())
-    # Default to 'All'
     selected_database = st.selectbox("Database:", options=all_databases, index=0, key="database_filter")
 
 with filter_cols_1[3]:
@@ -71,9 +75,7 @@ with filter_cols_1[3]:
     if selected_database != 'All':
         available_schemas = st.session_state.full_tables_data[st.session_state.full_tables_data['DATABASE_NAME'] == selected_database]['SCHEMA_NAME'].unique().tolist()
     all_schemas_filtered = ['All'] + sorted(available_schemas)
-    # Default to 'All'
     selected_schema = st.selectbox("Schema:", options=all_schemas_filtered, index=0, key="schema_filter")
-
 
 with filter_cols_2[0]:
     current_filtered_table_names_for_widget = st.session_state.full_tables_data['TABLE_NAME'].unique().tolist()
@@ -99,111 +101,151 @@ with filter_cols_2[3]:
 
 st.markdown("---") # Visual separator
 
-# --- Filter Logic for the Main DataFrame (now automatic on rerun) ---
-filtered_df = st.session_state.full_tables_data.copy()
+# --- FILTERING LOGIC (Updates data for the fragment) ---
+# This part is outside the fragment and runs on every app rerun (e.g., filter change)
+filtered_df_for_frag = st.session_state.full_tables_data.copy()
 
 if selected_domain != 'All':
-    filtered_df = filtered_df[filtered_df['DOMAIN_NAME'] == selected_domain]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['DOMAIN_NAME'] == selected_domain]
 if selected_sub_domain != 'All':
-    filtered_df = filtered_df[filtered_df['SUB_DOMAIN_NAME'] == selected_sub_domain]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['SUB_DOMAIN_NAME'] == selected_sub_domain]
 if selected_database != 'All':
-    filtered_df = filtered_df[filtered_df['DATABASE_NAME'] == selected_database]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['DATABASE_NAME'] == selected_database]
 if selected_schema != 'All':
-    filtered_df = filtered_df[filtered_df['SCHEMA_NAME'] == selected_schema]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['SCHEMA_NAME'] == selected_schema]
 if selected_tables_filter:
-    filtered_df = filtered_df[filtered_df['TABLE_NAME'].isin(selected_tables_filter)]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['TABLE_NAME'].isin(selected_tables_filter)]
 if 'All' not in selected_scheduling_states:
-    filtered_df = filtered_df[filtered_df['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_states)]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['SCHEDULING_STATE_STATUS'].isin(selected_scheduling_states)]
 if 'All' not in selected_target_lags:
-    filtered_df = filtered_df[filtered_df['TARGET_LAG_SEC'].isin(selected_target_lags)]
+    filtered_df_for_frag = filtered_df_for_frag[filtered_df_for_frag['TARGET_LAG_SEC'].isin(selected_target_lags)]
 
-# Add selection columns, initialized based on global state
-filtered_df['SNAPSHOT_SELECT'] = filtered_df['FULL_TABLE_IDENTIFIER'].apply(
+# Initialize selection columns based on GLOBAL state for the fragment's input
+filtered_df_for_frag['SNAPSHOT_SELECT'] = filtered_df_for_frag['FULL_TABLE_IDENTIFIER'].apply(
     lambda x: x in st.session_state.selected_snapshot_tables
 )
-filtered_df['REFRESH_HISTORY_SELECT'] = filtered_df['FULL_TABLE_IDENTIFIER'].apply(
+filtered_df_for_frag['REFRESH_HISTORY_SELECT'] = filtered_df_for_frag['FULL_TABLE_IDENTIFIER'].apply(
     lambda x: x in st.session_state.selected_refresh_history_tables
 )
-
-st.session_state.filtered_tables_for_display = filtered_df.reset_index(drop=True)
-
-# Also, re-initialize `current_edited_df_state` from the newly filtered data.
-st.session_state.current_edited_df_state = st.session_state.filtered_tables_for_display.copy()
+st.session_state.filtered_tables_for_display_frag = filtered_df_for_frag.reset_index(drop=True)
 
 
-# --- Display and Select Tables (Main Editor) ---
-current_filtered_tables_count = len(st.session_state.filtered_tables_for_display)
+# --- Define the Fragment for Table Selection ---
+@st.fragment
+def table_selection_fragment(df_to_display: pd.DataFrame):
+    current_filtered_tables_count_frag = len(df_to_display)
 
-st.subheader(
-    f"Select Tables for Actions ({current_filtered_tables_count} total)"
-)
-
-if not st.session_state.filtered_tables_for_display.empty:
-    column_configurations = {
-        "SNAPSHOT_SELECT": st.column_config.CheckboxColumn("Take Snap", help="Check to take a snapshot", default=False, disabled=False),
-        "REFRESH_HISTORY_SELECT": st.column_config.CheckboxColumn("Refresh Hist", help="Check to refresh history", default=False, disabled=False),
-        "DOMAIN_NAME": st.column_config.TextColumn("Domain", disabled=True),
-        "SUB_DOMAIN_NAME": st.column_config.TextColumn("Sub-Domain", disabled=True),
-        "DATABASE_NAME": st.column_config.TextColumn("Database", disabled=True),
-        "SCHEMA_NAME": st.column_config.TextColumn("Schema", disabled=True),
-        "TABLE_NAME": st.column_config.TextColumn("Table Name", disabled=True),
-        "SCHEDULING_STATE_STATUS": st.column_config.TextColumn("Status", disabled=True),
-        "TARGET_LAG_SEC_FMT": st.column_config.TextColumn("Lag", disabled=True),
-        # FULL_TABLE_IDENTIFIER is configured as hidden but is still part of the DF
-        "FULL_TABLE_IDENTIFIER": st.column_config.TextColumn(disabled=True, width="HIDDEN")
-    }
-
-    # IMPORTANT CHANGE: Pass the full `st.session_state.current_edited_df_state` to data_editor
-    # and use the `column_order` parameter to control visible columns.
-    edited_df_from_editor = st.data_editor(
-        st.session_state.current_edited_df_state, # Pass the entire DataFrame
-        column_config=column_configurations,
-        column_order=[ # Explicitly define the order and visibility
-            "SNAPSHOT_SELECT", "REFRESH_HISTORY_SELECT", "DOMAIN_NAME", "SUB_DOMAIN_NAME",
-            "DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "SCHEDULING_STATE_STATUS", "TARGET_LAG_SEC_FMT"
-        ],
-        hide_index=True,
-        use_container_width=True,
-        key="live_table_editor"
+    st.subheader(
+        f"Select Tables for Actions ({current_filtered_tables_count_frag} total)"
     )
 
-    # IMPT: Update st.session_state.current_edited_df_state immediately with changes from the editor
-    # This prevents the "unchecking" issue as this DataFrame is the source for data_editor
-    st.session_state.current_edited_df_state = edited_df_from_editor.copy()
+    # --- Callbacks for Select All Checkboxes ---
+    # These callbacks only set the flags. The main fragment logic applies the change.
+    def set_do_select_all_snap_frag_callback():
+        st.session_state.do_select_all_snap_frag = st.session_state.select_all_snap_cb_state_frag
 
-    # --- "Confirm Selections" Button ---
-    st.markdown("---")
-    confirm_col1, confirm_col2, confirm_col3 = st.columns([0.6, 0.2, 0.2])
-    with confirm_col3:
-        if st.button("Confirm Selections", use_container_width=True, key="confirm_selection_btn"):
-            for index, row in st.session_state.current_edited_df_state.iterrows():
-                # Now, FULL_TABLE_IDENTIFIER is guaranteed to be in `row`
-                table_id = row['FULL_TABLE_IDENTIFIER']
+    def set_do_select_all_refresh_frag_callback():
+        st.session_state.do_select_all_refresh_frag = st.session_state.select_all_refresh_cb_state_frag
 
-                if row['SNAPSHOT_SELECT']:
-                    st.session_state.selected_snapshot_tables.add(table_id)
-                else:
-                    if table_id in st.session_state.selected_snapshot_tables:
-                        st.session_state.selected_snapshot_tables.remove(table_id)
+    # --- Apply "Select All" flags within the fragment ---
+    # This ensures changes made by select-all checkboxes are visible instantly in the editor
+    # and don't require a full app rerun.
+    if st.session_state.do_select_all_snap_frag is not None:
+        df_to_display['SNAPSHOT_SELECT'] = st.session_state.do_select_all_snap_frag
+        st.session_state.do_select_all_snap_frag = None # Reset flag after applying
+        # st.rerun(scope="fragment") # No need, data_editor will update
 
-                if row['REFRESH_HISTORY_SELECT']:
-                    st.session_state.selected_refresh_history_tables.add(table_id)
-                else:
-                    if table_id in st.session_state.selected_refresh_history_tables:
-                        st.session_state.selected_refresh_history_tables.remove(table_id)
-            
-            st.success("Selections confirmed and updated!")
-            st.rerun()
-
-else:
-    st.info("No tables to display matching your filters. Adjust filters above.")
+    if st.session_state.do_select_all_refresh_frag is not None:
+        df_to_display['REFRESH_HISTORY_SELECT'] = st.session_state.do_select_all_refresh_frag
+        st.session_state.do_select_all_refresh_frag = None # Reset flag after applying
+        # st.rerun(scope="fragment") # No need, data_editor will update
 
 
-# --- DEDICATED "YOUR SELECTIONS" SECTION ---
+    # --- "Select All" Checkboxes positioned above data_editor ---
+    select_all_cols_frag = st.columns([0.05, 0.08, 0.87])
+    with select_all_cols_frag[0]:
+        initial_snap_all_state_frag = (current_filtered_tables_count_frag > 0 and
+                                       df_to_display['SNAPSHOT_SELECT'].all())
+        st.checkbox(" ", value=initial_snap_all_state_frag, key="select_all_snap_cb_state_frag",
+                    on_change=set_do_select_all_snap_frag_callback, help="Select/Deselect All Snapshots")
+    with select_all_cols_frag[1]:
+        initial_refresh_all_state_frag = (current_filtered_tables_count_frag > 0 and
+                                          df_to_display['REFRESH_HISTORY_SELECT'].all())
+        st.checkbox(" ", value=initial_refresh_all_state_frag, key="select_all_refresh_cb_state_frag",
+                    on_change=set_do_select_all_refresh_frag_callback, help="Select/Deselect All Refresh History")
+
+
+    if not df_to_display.empty:
+        column_configurations = {
+            "SNAPSHOT_SELECT": st.column_config.CheckboxColumn("Take Snap", help="Check to take a snapshot", default=False, disabled=False),
+            "REFRESH_HISTORY_SELECT": st.column_config.CheckboxColumn("Refresh Hist", help="Check to refresh history", default=False, disabled=False),
+            "DOMAIN_NAME": st.column_config.TextColumn("Domain", disabled=True),
+            "SUB_DOMAIN_NAME": st.column_config.TextColumn("Sub-Domain", disabled=True),
+            "DATABASE_NAME": st.column_config.TextColumn("Database", disabled=True),
+            "SCHEMA_NAME": st.column_config.TextColumn("Schema", disabled=True),
+            "TABLE_NAME": st.column_config.TextColumn("Table Name", disabled=True),
+            "SCHEDULING_STATE_STATUS": st.column_config.TextColumn("Status", disabled=True),
+            "TARGET_LAG_SEC_FMT": st.column_config.TextColumn("Lag", disabled=True),
+            "FULL_TABLE_IDENTIFIER": st.column_config.TextColumn(disabled=True, width="HIDDEN")
+        }
+
+        # IMPORTANT: st.data_editor now receives `df_to_display` directly.
+        # It's an internal fragment-scoped copy that it operates on.
+        edited_df_from_editor = st.data_editor(
+            df_to_display, # Pass the completely prepped DataFrame for this fragment
+            column_config=column_configurations,
+            column_order=[
+                "SNAPSHOT_SELECT", "REFRESH_HISTORY_SELECT", "DOMAIN_NAME", "SUB_DOMAIN_NAME",
+                "DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "SCHEDULING_STATE_STATUS", "TARGET_LAG_SEC_FMT"
+            ],
+            hide_index=True,
+            use_container_width=True,
+            key="live_table_editor_frag" # Use a unique key for the fragment's editor
+        )
+
+        # The edits from data_editor are directly reflected in `edited_df_from_editor`.
+        # This `edited_df_from_editor` represents the current visual state of the fragment.
+
+
+        # --- "Confirm Selections" Button (inside fragment) ---
+        st.markdown("---")
+        confirm_col1_frag, confirm_col2_frag, confirm_col3_frag = st.columns([0.6, 0.2, 0.2])
+        with confirm_col3_frag:
+            # This button will now trigger a FULL APP rerun
+            if st.button("Confirm Selections", use_container_width=True, key="confirm_selection_btn_frag"):
+                # Iterate through `edited_df_from_editor` (the latest state from fragment interaction)
+                # to update the GLOBAL persistent selection sets.
+                for index, row in edited_df_from_editor.iterrows():
+                    table_id = row['FULL_TABLE_IDENTIFIER']
+
+                    if row['SNAPSHOT_SELECT']:
+                        st.session_state.selected_snapshot_tables.add(table_id)
+                    else:
+                        if table_id in st.session_state.selected_snapshot_tables:
+                            st.session_state.selected_snapshot_tables.remove(table_id)
+
+                    if row['REFRESH_HISTORY_SELECT']:
+                        st.session_state.selected_refresh_history_tables.add(table_id)
+                    else:
+                        if table_id in st.session_state.selected_refresh_history_tables:
+                            st.session_state.selected_refresh_history_tables.remove(table_id)
+                
+                st.success("Selections confirmed and updated!")
+                st.rerun() # Full app rerun to update global selections display and action buttons
+
+    else:
+        st.info("No tables to display matching your filters. Adjust filters above.")
+
+
+# --- Render the fragment ---
+# Pass the filtered_df_for_frag as input to the fragment
+table_selection_fragment(st.session_state.filtered_tables_for_display_frag)
+
+
+# --- DEDICATED "YOUR SELECTIONS" SECTION (outside fragment - unchanged) ---
 st.markdown("---")
 st.header("Your Current Selections")
 
-# --- Snapshot Selections ---
 snapshot_selected_ids = list(st.session_state.selected_snapshot_tables)
 if snapshot_selected_ids:
     snapshot_display_df = st.session_state.full_tables_data[
@@ -221,9 +263,8 @@ if snapshot_selected_ids:
 else:
     st.info("No tables currently selected for Snapshot.")
 
-st.markdown("---") # Separator between selection lists
+st.markdown("---")
 
-# --- Refresh History Selections ---
 refresh_history_selected_ids = list(st.session_state.selected_refresh_history_tables)
 if refresh_history_selected_ids:
     refresh_history_display_df = st.session_state.full_tables_data[
@@ -241,7 +282,7 @@ if refresh_history_selected_ids:
 else:
     st.info("No tables currently selected for Refresh History.")
 
-# --- Action Buttons (referring to the GLOBAL persistent selection state) ---
+# --- Action Buttons (outside fragment - unchanged) ---
 st.markdown("---")
 col_action1, col_action2 = st.columns(2)
 
@@ -249,7 +290,6 @@ with col_action1:
     if st.button(f"Execute Snapshot Action ({len(st.session_state.selected_snapshot_tables)} tables)",
                  disabled=(len(st.session_state.selected_snapshot_tables) == 0)):
         st.success(f"Initiating Snapshot for {len(st.session_state.selected_snapshot_tables)} tables.")
-        # Your actual action logic here
         st.session_state.selected_snapshot_tables.clear()
         st.rerun()
 
@@ -257,7 +297,6 @@ with col_action2:
     if st.button(f"Execute Refresh History Action ({len(st.session_state.selected_refresh_history_tables)} tables)",
                  disabled=(len(st.session_state.selected_refresh_history_tables) == 0)):
         st.success(f"Initiating Refresh History for {len(st.session_state.selected_refresh_history_tables)} tables.")
-        # Your actual action logic here
         st.session_state.selected_refresh_history_tables.clear()
         st.rerun()
 
