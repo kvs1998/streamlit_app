@@ -1,0 +1,23 @@
+WITH RankedFlags AS (
+    SELECT
+        trade_id,
+        flag,
+        hvr_change_time,
+        LAG(flag) OVER (PARTITION BY trade_id ORDER BY hvr_change_time) AS previous_flag
+    FROM
+        your_table_name -- Replace with your actual table name
+),
+FilteredTrades AS (
+    SELECT
+        trade_id,
+        flag,
+        hvr_change_time,
+        previous_flag
+    FROM
+        RankedFlags
+    WHERE
+        LENGTH(previous_flag) > LENGTH(flag)
+        OR previous_flag IS NULL -- Keep the first entry for each trade_id if you want to see all context
+)
+SELECT DISTINCT trade_id
+FROM FilteredTrades;
