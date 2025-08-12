@@ -13,7 +13,6 @@ class Colors:
     UNDERLINE = "\033[4m"
 
 # Configure logging
-# We will intercept log messages to add colors
 class ColoredFormatter(logging.Formatter):
     def format(self, record):
         log_message = super().format(record)
@@ -25,7 +24,6 @@ class ColoredFormatter(logging.Formatter):
             return f"{Colors.ERROR}{log_message}{Colors.RESET}"
         return log_message
 
-# Remove default handlers if any, and add our custom handler
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
@@ -56,15 +54,18 @@ def add_trailing_semicolon(sql_content):
 
 # --- Main Combination Function ---
 
-def combine_sql_files_in_directories(base_directory):
+def combine_sql_files_recursively(base_directory):
     """
-    Combines all .sql files found in each direct subdirectory of the base_directory
-    into a single output_filename, named after the subdirectory.
+    Combines all .sql files found in each subdirectory (recursively) of the base_directory
+    into a single output_filename within that subdirectory. The output filename
+    is constructed by concatenating the name of the base_directory and then
+    the names of all subsequent parent directories down to the current directory,
+    followed by '_combined_scripts.sql'.
     - If any SQL file in a directory cannot be read, the entire merge for that directory is discarded.
     - Each file content is checked for and possibly appended with a trailing semicolon.
     - File extension check is case-insensitive.
     """
-    logger.info(f"{Colors.BOLD}--- Starting SQL file combination process in: '{base_directory}' ---{Colors.RESET}\n")
+    logger.info(f"{Colors.BOLD}--- Starting SQL file combination process in: '{base_directory}' (recursive) ---{Colors.RESET}\n")
 
     if not os.path.isdir(base_directory):
         logger.error(f"Base directory '{base_directory}' not found. Please provide a valid path.")
@@ -72,133 +73,150 @@ def combine_sql_files_in_directories(base_directory):
 
     processed_directories_summary = []
 
-    for item_name in os.listdir(base_directory):
-        item_path = os.path.join(base_directory, item_name)
+    # Get the name of the base directory (e.g., 'Eldrich_script')
+    base_dir_name = os.path.basename(base_directory)
 
-        if os.path.isdir(item_path):
-            # Deduce the output filename based on the directory name
-            # For 'dynamic_table' dir, output will be 'dynamic_table_combined_scripts.sql'
-            output_filename = f"{item_name}_combined_scripts.sql"
+    # os.walk yields a 3-tuple: (dirpath, dirnames, filenames)
+    for dirpath, dirnames, filenames in os.walk(base_directory):
+        # We want to process actual subdirectories where combined files will reside.
+        # This means we don't generate a combined file directly in the base_directory
+        # UNLESS base_directory itself contains SQL files and no subdirectories are below it.
+        # However, typically combined files are generated *inside* distinct modules/folders.
+
+        # Calculate relative path from base_directory
+        relative_path = os.path.relpath(dirpath, base_directory)
+
+        # If we are at the base_directory itself and it's not a leaf directory (i.e., it has subdirectories)
+        # then we skip creating a combined file *in the base_directory*.
+        # We assume combined files are generated within the direct sub-folders or deeper.
+        if relative_path == "." and dirnames:
+            logger.info(f"--- Skipping base directory '{dirpath}' for combined file generation (contains subdirectories). ---")
+            continue
+        
+        # --- Dynamic Output Filename Generation ---
+        # Start with the base directory's name
+        components_for_filename = [base_dir_name]
+        
+        # Add names of subdirectories in the path relative to base_directory
+        if relative_path != ".": # Don't add an empty string or "." if it's the base_directory itself
+            # Split the relative path (e.g., "dynamic_table/nested_folder") into components
+            components_for_filename.extend(relative_path.split(os.sep))
+        
+        # Join components to form the prefix, e.g., "Eldrich_script_dynamic_table_nested_folder"
+        prefix = "_".join(components_for_filename)
+        output_filename = f"{prefix}_combined_scripts.sql"
             
-            logger.info(f"{Colors.BOLD}--- Processing directory: '{item_path}' ---{Colors.RESET}")
+        logger.info(f"{Colors.BOLD}--- Processing directory: '{dirpath}' ---{Colors.RESET}")
+        
+        output_file_path = os.path.join(dirpath, output_filename)
+        all_sql_content = []
+        
+        sql_files_to_process = []
+        errored_files_in_dir = []
+        
+        # Identify SQL files (case-insensitively) and filter out the output file itself
+        for file_name in filenames: # Use 'filenames' from os.walk for current directory
+            # Check for .sql extension case-insensitively
+            if file_name.lower().endswith(".sql") and file_name != output_filename:
+                sql_files_to_process.append(file_name)
+
+        if not sql_files_to_process:
+            logger.info(f"  No .sql files (excluding '{output_filename}') found in '{dirpath}'. Skipping.\n")
+            processed_directories_summary.append({
+                "directory": dirpath,
+                "status": "Skipped",
+                "reason": "No SQL files found"
+            })
+            continue # Move to the next directory/sub-directory
+
+        logger.info(f"  Found {len(sql_files_to_process)} .sql files to potentially combine.")
+        
+        for file_name in sql_files_to_process:
+            sql_file_path = os.path.join(dirpath, file_name)
             
-            output_file_path = os.path.join(item_path, output_filename)
-            all_sql_content = []
-            
-            sql_files_to_process = []
-            errored_files_in_dir = []
-            
-            # First pass: Identify SQL files (case-insensitively) and filter out the output file itself
-            for file_name in os.listdir(item_path):
-                # Check for .sql extension case-insensitively
-                if file_name.lower().endswith(".sql") and file_name != output_filename:
-                    sql_files_to_process.append(file_name)
-
-            if not sql_files_to_process:
-                logger.info(f"  No .sql files (excluding '{output_filename}') found in '{item_path}'. Skipping.\n")
-                processed_directories_summary.append({
-                    "directory": item_path,
-                    "status": "Skipped",
-                    "reason": "No SQL files found"
-                })
-                continue # Move to the next directory
-
-            logger.info(f"  Found {len(sql_files_to_process)} .sql files to potentially combine.")
-            
-            # Second pass: Read content and handle errors/modifications
-            for file_name in sql_files_to_process:
-                sql_file_path = os.path.join(item_path, file_name)
-                
-                try:
-                    with open(sql_file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        
-                        # --- SQL Standard Checks & Modifications ---
-                        # 1. Add trailing semicolon
-                        modified_content = add_trailing_semicolon(content)
-                        if modified_content != content:
-                            logger.info(f"    - Added trailing semicolon to '{file_name}'.")
-
-                        # Add content and a separator for readability
-                        all_sql_content.append(f"-- --- Start of {file_name} ---")
-                        all_sql_content.append(modified_content.strip()) # strip to avoid leading/trailing newlines from original file
-                        all_sql_content.append(f"-- --- End of {file_name} ---\n\n") # Double newline for separation
-                        logger.info(f"    - Processed '{file_name}'.")
-
-                except Exception as e:
-                    errored_files_in_dir.append(file_name)
-                    logger.error(f"  Error reading file '{sql_file_path}': {e}")
-                    # Continue to next file to collect all errors for the summary
-
-            if errored_files_in_dir:
-                logger.warning(f"\n  Errors detected during file reads in '{item_path}'. Discarding merge.")
-                logger.warning(f"  Errored files: {', '.join(errored_files_in_dir)}\n")
-                processed_directories_summary.append({
-                    "directory": item_path,
-                    "status": "Failed (Discarded)",
-                    "reason": "Errors reading source SQL files",
-                    "errored_files": errored_files_in_dir
-                })
-                continue # Move to the next directory
-            
-            if not all_sql_content: # This would happen if all files had read errors
-                logger.warning(f"\n  No valid SQL content to combine from '{item_path}'. Discarding merge.\n")
-                processed_directories_summary.append({
-                    "directory": item_path,
-                    "status": "Failed (No Valid Content)",
-                    "reason": "No SQL files passed checks or were found"
-                })
-                continue
-
             try:
-                with open(output_file_path, 'w', encoding='utf-8') as outfile:
-                    outfile.write("\n".join(all_sql_content).strip() + "\n")
-                
-                # Calculate successfully combined files
-                success_count = len(sql_files_to_process) - len(errored_files_in_dir)
-                logger.info(f"  Successfully combined {success_count} valid SQL files into: '{output_file_path}'\n")
-                processed_directories_summary.append({
-                    "directory": item_path,
-                    "status": "Success",
-                    "files_combined": success_count,
-                    "output_file": output_file_path
-                })
+                with open(sql_file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    
+                    modified_content = add_trailing_semicolon(content)
+                    if modified_content != content:
+                        logger.info(f"    - Added trailing semicolon to '{file_name}'.")
+
+                    all_sql_content.append(f"-- --- Start of {file_name} ---")
+                    all_sql_content.append(modified_content.strip())
+                    all_sql_content.append(f"-- --- End of {file_name} ---\n\n")
+                    logger.info(f"    - Processed '{file_name}'.")
+
             except Exception as e:
-                logger.error(f"  Error writing combined file '{output_file_path}': {e}")
-                processed_directories_summary.append({
-                    "directory": item_path,
-                    "status": "Failed (Write Error)",
-                    "reason": f"Error writing combined file: {e}"
-                })
-        else:
-            # Skip non-directory items in the base_directory
-            logger.info(f"--- Skipping non-directory item: '{item_path}' ---\n")
+                errored_files_in_dir.append(file_name)
+                logger.error(f"  Error reading file '{sql_file_path}': {e}")
+
+        if errored_files_in_dir:
+            logger.warning(f"\n  Errors detected during file reads in '{dirpath}'. Discarding merge.")
+            logger.warning(f"  Errored files: {', '.join(errored_files_in_dir)}\n")
+            processed_directories_summary.append({
+                "directory": dirpath,
+                "status": "Failed (Discarded)",
+                "reason": "Errors reading source SQL files",
+                "errored_files": errored_files_in_dir
+            })
+            continue
+        
+        if not all_sql_content: # This would happen if all files had read errors
+            logger.warning(f"\n  No valid SQL content to combine from '{dirpath}'. Discarding merge.\n")
+            processed_directories_summary.append({
+                "directory": dirpath,
+                "status": "Failed (No Valid Content)",
+                "reason": "No SQL files passed checks or were found"
+            })
+            continue
+
+        try:
+            with open(output_file_path, 'w', encoding='utf-8') as outfile:
+                outfile.write("\n".join(all_sql_content).strip() + "\n")
+            
+            success_count = len(sql_files_to_process) - len(errored_files_in_dir)
+            logger.info(f"  Successfully combined {success_count} valid SQL files into: '{output_file_path}'\n")
+            processed_directories_summary.append({
+                "directory": dirpath,
+                "status": "Success",
+                "files_combined": success_count,
+                "output_file": output_file_path
+            })
+        except Exception as e:
+            logger.error(f"  Error writing combined file '{output_file_path}': {e}")
+            processed_directories_summary.append({
+                "directory": dirpath,
+                "status": "Failed (Write Error)",
+                "reason": f"Error writing combined file: {e}"
+            })
 
     logger.info(f"{Colors.BOLD}\n--- SQL file combination process finished. ---{Colors.RESET}")
     logger.info(f"{Colors.BOLD}\n--- Summary ---{Colors.RESET}")
     for entry in processed_directories_summary:
         status = entry['status']
-        dir_name = os.path.basename(entry['directory'])
+        dir_name_for_summary = os.path.relpath(entry['directory'], base_directory)
+        
         if status == "Success":
-            logger.info(f"  {Colors.SUCCESS}[SUCCESS]{Colors.RESET} Directory '{dir_name}': Combined {entry.get('files_combined', 'N/A')} files into '{os.path.basename(entry['output_file'])}'.")
+            logger.info(f"  {Colors.SUCCESS}[SUCCESS]{Colors.RESET} Directory '{dir_name_for_summary}': Combined {entry.get('files_combined', 'N/A')} files into '{os.path.basename(entry['output_file'])}'.")
         elif status == "Skipped":
-            logger.warning(f"  {Colors.WARNING}[SKIPPED]{Colors.RESET} Directory '{dir_name}': {entry['reason']}.")
+            logger.warning(f"  {Colors.WARNING}[SKIPPED]{Colors.RESET} Directory '{dir_name_for_summary}': {entry['reason']}.")
         elif status.startswith("Failed"):
             error_details = ""
             if 'errored_files' in entry:
                 error_details = f" due to errors in files: {', '.join(entry['errored_files'])}"
             elif 'reason' in entry:
                 error_details = f". Reason: {entry['reason']}."
-            logger.error(f"  {Colors.ERROR}[{status.upper()}]{Colors.RESET} Directory '{dir_name}': Discarded merge{error_details}.")
+            logger.error(f"  {Colors.ERROR}[{status.upper()}]{Colors.RESET} Directory '{dir_name_for_summary}': Discarded merge{error_details}.")
     logger.info(f"{Colors.BOLD}\n-----------------{Colors.RESET}")
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Combine SQL files in subdirectories, enforcing trailing semicolons and dynamic output filenames.")
+    parser = argparse.ArgumentParser(description="Combine SQL files recursively in subdirectories, enforcing trailing semicolons and dynamic output filenames based on concatenated directory paths including the base directory.")
     parser.add_argument("base_directory", nargs='?', 
-                        help="The base directory containing subdirectories with SQL files. Defaults to Eldrich_script in the script's parent dir if not provided.",
+                        help="The base directory from which to start recursive traversal. Defaults to Eldrich_script in the script's parent dir if not provided.",
                         default=None)
     
     args = parser.parse_args()
@@ -208,5 +226,4 @@ if __name__ == "__main__":
         base_script_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Eldrich_script")
         logger.info(f"No base directory path provided via arguments. Using default: '{base_script_directory}'")
 
-    # Removed output_name argument as it's now dynamically determined
-    combine_sql_files_in_directories(base_script_directory)
+    combine_sql_files_recursively(base_script_directory)
