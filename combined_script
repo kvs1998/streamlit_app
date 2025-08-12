@@ -56,12 +56,13 @@ def add_trailing_semicolon(sql_content):
 
 # --- Main Combination Function ---
 
-def combine_sql_files_in_directories(base_directory, output_filename="combined.sql"):
+def combine_sql_files_in_directories(base_directory):
     """
     Combines all .sql files found in each direct subdirectory of the base_directory
-    into a single output_filename.
+    into a single output_filename, named after the subdirectory.
     - If any SQL file in a directory cannot be read, the entire merge for that directory is discarded.
     - Each file content is checked for and possibly appended with a trailing semicolon.
+    - File extension check is case-insensitive.
     """
     logger.info(f"{Colors.BOLD}--- Starting SQL file combination process in: '{base_directory}' ---{Colors.RESET}\n")
 
@@ -75,6 +76,10 @@ def combine_sql_files_in_directories(base_directory, output_filename="combined.s
         item_path = os.path.join(base_directory, item_name)
 
         if os.path.isdir(item_path):
+            # Deduce the output filename based on the directory name
+            # For 'dynamic_table' dir, output will be 'dynamic_table_combined_scripts.sql'
+            output_filename = f"{item_name}_combined_scripts.sql"
+            
             logger.info(f"{Colors.BOLD}--- Processing directory: '{item_path}' ---{Colors.RESET}")
             
             output_file_path = os.path.join(item_path, output_filename)
@@ -83,9 +88,10 @@ def combine_sql_files_in_directories(base_directory, output_filename="combined.s
             sql_files_to_process = []
             errored_files_in_dir = []
             
-            # First pass: Identify SQL files and filter out the output file itself
+            # First pass: Identify SQL files (case-insensitively) and filter out the output file itself
             for file_name in os.listdir(item_path):
-                if file_name.endswith(".sql") and file_name != output_filename:
+                # Check for .sql extension case-insensitively
+                if file_name.lower().endswith(".sql") and file_name != output_filename:
                     sql_files_to_process.append(file_name)
 
             if not sql_files_to_process:
@@ -190,12 +196,10 @@ def combine_sql_files_in_directories(base_directory, output_filename="combined.s
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Combine SQL files in subdirectories, enforcing trailing semicolons.")
+    parser = argparse.ArgumentParser(description="Combine SQL files in subdirectories, enforcing trailing semicolons and dynamic output filenames.")
     parser.add_argument("base_directory", nargs='?', 
                         help="The base directory containing subdirectories with SQL files. Defaults to Eldrich_script in the script's parent dir if not provided.",
                         default=None)
-    parser.add_argument("--output_name", default="combined_queries.sql",
-                        help="The name of the combined output file in each subdirectory. Default: combined_queries.sql")
     
     args = parser.parse_args()
 
@@ -204,7 +208,5 @@ if __name__ == "__main__":
         base_script_directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Eldrich_script")
         logger.info(f"No base directory path provided via arguments. Using default: '{base_script_directory}'")
 
-    combine_sql_files_in_directories(
-        base_script_directory, 
-        args.output_name
-    )
+    # Removed output_name argument as it's now dynamically determined
+    combine_sql_files_in_directories(base_script_directory)
