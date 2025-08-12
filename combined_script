@@ -1,3 +1,9 @@
+# Example running from a terminal, providing the path as an argument
+python your_script_name.py "C:\Users\shahhuss\Downloads\Eldrich_script"
+
+# Or using the default path (if you've configured it correctly in the script)
+python your_script_name.py
+
 import os
 import sys
 import logging
