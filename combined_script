@@ -1,9 +1,3 @@
-# Example running from a terminal, providing the path as an argument
-python your_script_name.py "C:\Users\shahhuss\Downloads\Eldrich_script"
-
-# Or using the default path (if you've configured it correctly in the script)
-python your_script_name.py
-
 import os
 import sys
 import logging
@@ -65,8 +59,8 @@ def combine_sql_files_recursively(base_directory):
     Combines all .sql files found in each subdirectory (recursively) of the base_directory
     into a single output_filename within that subdirectory. The output filename
     is constructed by concatenating the name of the base_directory and then
-    the names of all subsequent parent directories down to the current directory,
-    followed by '_combined_scripts.sql'.
+    the names of all subsequent parent directories down to the current directory.
+    The final filename will be lowercase and end with '_combined_scripts.sql'.
     - If any SQL file in a directory cannot be read, the entire merge for that directory is discarded.
     - Each file content is checked for and possibly appended with a trailing semicolon.
     - File extension check is case-insensitive.
@@ -84,17 +78,10 @@ def combine_sql_files_recursively(base_directory):
 
     # os.walk yields a 3-tuple: (dirpath, dirnames, filenames)
     for dirpath, dirnames, filenames in os.walk(base_directory):
-        # We want to process actual subdirectories where combined files will reside.
-        # This means we don't generate a combined file directly in the base_directory
-        # UNLESS base_directory itself contains SQL files and no subdirectories are below it.
-        # However, typically combined files are generated *inside* distinct modules/folders.
-
-        # Calculate relative path from base_directory
+        
         relative_path = os.path.relpath(dirpath, base_directory)
 
-        # If we are at the base_directory itself and it's not a leaf directory (i.e., it has subdirectories)
-        # then we skip creating a combined file *in the base_directory*.
-        # We assume combined files are generated within the direct sub-folders or deeper.
+        # Skip base directory itself if it contains subdirectories
         if relative_path == "." and dirnames:
             logger.info(f"--- Skipping base directory '{dirpath}' for combined file generation (contains subdirectories). ---")
             continue
@@ -104,12 +91,11 @@ def combine_sql_files_recursively(base_directory):
         components_for_filename = [base_dir_name]
         
         # Add names of subdirectories in the path relative to base_directory
-        if relative_path != ".": # Don't add an empty string or "." if it's the base_directory itself
-            # Split the relative path (e.g., "dynamic_table/nested_folder") into components
+        if relative_path != ".":
             components_for_filename.extend(relative_path.split(os.sep))
         
-        # Join components to form the prefix, e.g., "Eldrich_script_dynamic_table_nested_folder"
-        prefix = "_".join(components_for_filename)
+        # Join components to form the prefix, and convert to lowercase
+        prefix = "_".join(components_for_filename).lower() # <--- CHANGE IS HERE
         output_filename = f"{prefix}_combined_scripts.sql"
             
         logger.info(f"{Colors.BOLD}--- Processing directory: '{dirpath}' ---{Colors.RESET}")
@@ -220,7 +206,7 @@ def combine_sql_files_recursively(base_directory):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Combine SQL files recursively in subdirectories, enforcing trailing semicolons and dynamic output filenames based on concatenated directory paths including the base directory.")
+    parser = argparse.ArgumentParser(description="Combine SQL files recursively in subdirectories, enforcing trailing semicolons and dynamic output filenames based on concatenated directory paths including the base directory, all in lowercase.")
     parser.add_argument("base_directory", nargs='?', 
                         help="The base directory from which to start recursive traversal. Defaults to Eldrich_script in the script's parent dir if not provided.",
                         default=None)
