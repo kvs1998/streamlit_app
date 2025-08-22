@@ -1,23 +1,13 @@
-WITH RankedFlags AS (
-    SELECT
-        trade_id,
-        flag,
-        hvr_change_time,
-        LAG(flag) OVER (PARTITION BY trade_id ORDER BY hvr_change_time) AS previous_flag
-    FROM
-        your_table_name -- Replace with your actual table name
-),
-FilteredTrades AS (
-    SELECT
-        trade_id,
-        flag,
-        hvr_change_time,
-        previous_flag
-    FROM
-        RankedFlags
-    WHERE
-        LENGTH(previous_flag) > LENGTH(flag)
-        OR previous_flag IS NULL -- Keep the first entry for each trade_id if you want to see all context
-)
-SELECT DISTINCT trade_id
-FROM FilteredTrades;
+SELECT 
+    dt.database_name,
+    dt.schema_name,
+    dt.name AS dynamic_table_name,
+    t.name AS task_name,
+    t.warehouse AS warehouse_name,
+    w.size AS warehouse_size
+FROM snowflake.account_usage.dynamic_tables dt
+JOIN snowflake.account_usage.tasks t
+    ON dt.task_id = t.id
+JOIN snowflake.account_usage.warehouses w
+    ON t.warehouse = w.name
+ORDER BY dt.database_name, dt.schema_name, dt.name;
