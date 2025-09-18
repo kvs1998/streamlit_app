@@ -1,123 +1,282 @@
-def paginate_dataframe(dataframe, page_size, page_num):
 
-    page_size = page_size
+==================================
 
-    if page_size is None:
+my_snowflake_db_project/
+├── liquibase.properties
+├── db.changelog-master.yaml        # Master orchestrator
+├── lib/
+│   └── snowflake-jdbc-3.latest.jar
+└── changes/
+    ├── core/                       # Core schema components (often stable)
+    │   ├── 001_users_table.yaml
+    │   └── 002_audit_log_table.yaml
+    ├── features/
+    │   ├── sales_management/       # All changes for the sales feature
+    │   │   ├── 001_sales_table.yaml
+    │   │   ├── 002_products_table.yaml
+    │   │   ├── 003_add_promotions_column.yaml
+    │   │   └── views/
+    │   │       └── sales_dashboard_view.sql
+    │   └── inventory_management/   # All changes for inventory feature
+    │       ├── 001_inventory_table.yaml
+    │       └── 002_supplier_table.yaml
+    └── data/                       # Initial data inserts, lookup tables, etc.
+        ├── 001_seed_initial_users.yaml
+        ├── 002_seed_product_categories.yaml
+        └── reference_data/
+            └── regions_lookup.yaml
 
-        return None
+# my_snowflake_db_project/db.changelog-master.yaml
 
-    offset = page_size*(page_num-1)
+databaseChangeLog:
+  # Core schema setup
+  - include:
+      file: changes/core/001_users_table.yaml
+  - include:
+      file: changes/core/002_audit_log_table.yaml
 
-    return dataframe[offset:offset + page_size]
+  # Sales Management Feature
+  - include:
+      file: changes/features/sales_management/001_sales_table.yaml
+  - include:
+      file: changes/features/sales_management/002_products_table.yaml
+  - include:
+      file: changes/features/sales_management/003_add_promotions_column.yaml
+  - include:
+      file: changes/features/sales_management/views/sales_dashboard_view.sql # Referencing a raw SQL file in a nested path
 
-CREATE OR REPLACE TABLE YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG (
-    DRIVER_RUN_UUID VARCHAR PRIMARY KEY,
-    RUN_STATUS VARCHAR, -- 'SUCCESS', 'FAILED_OVERALL', 'CRITICAL_FAILURE'
-    RUN_START_TIME TIMESTAMP_LTZ,
-    RUN_END_TIME TIMESTAMP_LTZ,
-    TOTAL_DURATION_SEC NUMBER(10,3),
-    TOTAL_TABLES_FOUND INTEGER,
-    TOTAL_JOBS_LAUNCHED INTEGER,
-    TOTAL_ASYNC_JOBS_SUCCEEDED INTEGER,
-    TOTAL_ASYNC_JOBS_FAILED INTEGER,
-    AUDIT_JSON VARIANT, -- Stores the complete JSON object returned by the SP
-    LOAD_TIMESTAMP TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-);
+  # Inventory Management Feature
+  - include:
+      file: changes/features/inventory_management/001_inventory_table.yaml
+  - include:
+      file: changes/features/inventory_management/002_supplier_table.yaml
 
--- Optional: Add a clustering key if you expect many rows and want faster lookups by time
-ALTER TABLE YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG CLUSTER BY (RUN_START_TIME::DATE);
-
-
-
--- Replace placeholders YOUR_DB, YOUR_SCHEMA, YOUR_WAREHOUSE
--- Adjust schedule, batch size as needed.
-
-CREATE OR REPLACE TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK
-  WAREHOUSE = YOUR_WAREHOUSE_NAME
-  SCHEDULE = 'USING CRON 0 3 * * * America/Los_Angeles'
-  ALLOW_OVERLAPPING_EXECUTION = FALSE
-  USER_TASK_TIMEOUT_MS = 14400000
-  SUSPEND_TASK_AFTER_NUM_FAILURES = 3
-  COMMENT = 'Orchestrates the collection of Dynamic Table metadata and refresh history and logs audit to T_DT_COLLECTION_AUDIT_LOG.'
-  LOG_LEVEL = 'INFO'
-AS
-$$
-    -- Snowflake Scripting block within the task
-    DECLARE
-        sp_result VARIANT; -- Declare a variable to hold the JSON output
-    BEGIN
-        -- Call your main driver stored procedure
-        sp_result := CALL YOUR_DB.YOUR_SCHEMA.SP_DRIVE_ALL_DT_COLLECTION(
-            P_ASYNC_BATCH_SIZE => 50, -- Your chosen batch size
-            P_TIMEZONE_NAME => 'America/Los_Angeles' -- Pass the timezone to the SP
-        );
-
-        -- Insert the parsed components of the JSON output into your audit table
-        INSERT INTO YOUR_DB.YOUR_SCHEMA.T_DT_COLLECTION_AUDIT_LOG (
-            DRIVER_RUN_UUID,
-            RUN_STATUS,
-            RUN_START_TIME,
-            RUN_END_TIME,
-            TOTAL_DURATION_SEC,
-            TOTAL_TABLES_FOUND,
-            TOTAL_JOBS_LAUNCHED,
-            TOTAL_ASYNC_JOBS_SUCCEEDED,
-            TOTAL_ASYNC_JOBS_FAILED,
-            AUDIT_JSON
-        )
-        SELECT
-            sp_result:driver_run_uuid::VARCHAR,
-            sp_result:status::VARCHAR,
-            sp_result:start_time::TIMESTAMP_LTZ,
-            sp_result:end_time::TIMESTAMP_LTZ,
-            sp_result:total_run_duration_sec::NUMBER(10,3),
-            sp_result:total_tables_found::INTEGER,
-            sp_result:total_jobs_launched::INTEGER,
-            sp_result:total_async_jobs_succeeded::INTEGER,
-            sp_result:total_async_jobs_failed::INTEGER,
-            sp_result -- Store the entire JSON object for full detail
-        ;
-        
-        -- Optional: Add auditing for task success/failure based on sp_result:status
-        -- e.g., if sp_result:status is 'FAILED_OVERALL', you could log to a separate simple error table
-        -- or trigger an alert using an ERROR_INTEGRATION on the task.
-        
-        -- Tasks implicitly commit DMLs by default. If the insert fails, the task will fail.
-    END;
-$$;
-
--- After creation, remember to resume the task:
-ALTER TASK YOUR_DB.YOUR_SCHEMA.DAILY_DT_COLLECTION_TASK RESUME;
+  # Data seeding
+  - include:
+      file: changes/data/001_seed_initial_users.yaml
+  - include:
+      file: changes/data/002_seed_product_categories.yaml
+  - include:
+      file: changes/data/reference_data/regions_lookup.yaml
 
 
 
+# my_snowflake_db_project/db.changelog-master.yaml
 
-    SELECT
-        main.DRIVER_RUN_UUID,
-        main.RUN_STATUS AS DRIVER_EXECUTION_STATUS, -- Status of the main driver run
-        main.RUN_START_TIME,
-        main.RUN_END_TIME,
-        main.TOTAL_DURATION_SEC,
-        
-        -- Details from the flattened job_audit_details array
-        job_audit.value:qualified_name::VARCHAR AS QUALIFIED_NAME,
-        job_audit.value:overall_table_status::VARCHAR AS OVERALL_TABLE_STATUS_FOR_DT,
-        
-        -- Extract specific job_type statuses and messages
-        GET(GET(job_audit.value:job_details, 'REFRESH_HISTORY'), 'status')::VARCHAR AS REFRESH_HISTORY_STATUS,
-        GET(GET(job_audit.value:job_details, 'REFRESH_HISTORY'), 'message')::VARCHAR AS REFRESH_HISTORY_MESSAGE, -- Will be NULL if SUCCESS
-        
-        GET(GET(job_audit.value:job_details, 'METADATA_SNAPSHOT'), 'status')::VARCHAR AS METADATA_SNAPSHOT_STATUS,
-        GET(GET(job_audit.value:job_details, 'METADATA_SNAPSHOT'), 'message')::VARCHAR AS METADATA_SNAPSHOT_MESSAGE, -- Will be NULL if SUCCESS
-        
-        -- You can add more columns from AUDIT_JSON as needed, e.g., phase_durations_sec etc.
-        -- main.AUDIT_JSON -- Keep the full JSON if you want to drill down further in Python
-    FROM
-        {AUDIT_LOG_TABLE_FQDN} AS main,
-        LATERAL FLATTEN(input => main.AUDIT_JSON:job_audit_details) AS job_audit -- Flatten the array of job_audit_details
-    WHERE
-        main.RUN_START_TIME >= DATEADD(day, -30, CURRENT_TIMESTAMP()) -- Last 30 days
-    ORDER BY
-        main.RUN_START_TIME DESC,
-        QUALIFIED_NAME ASC -- Order by table name for consistency
+databaseChangeLog:
+  # Include all changelogs in the 'core' directory (sorted alphabetically by filename)
+  - includeAll:
+      path: changes/core/
+
+  # Include all changelogs in the 'sales_management' directory
+  - includeAll:
+      path: changes/features/sales_management/
+
+  # Explicitly include a specific data seeding file
+  - include:
+      file: changes/data/001_seed_initial_users.yaml
+
+  # Include all changelogs in the 'reference_data' directory
+  - includeAll:
+      path: changes/data/reference_data/
+
+
+
+===============================
+
+
+my_snowflake_db_project/
+├── liquibase.properties          # Liquibase configuration (DB connection, master changelog path)
+├── db.changelog-master.yaml      # The master changelog that orchestrates all changes
+├── lib/                          # Directory for custom JDBC drivers (if not bundled)
+│   └── snowflake-jdbc-3.latest.jar # (Optional) If you need a specific driver version
+└── changes/                      # Directory for individual, granular changelogs
+    ├── 001_initial_schema.yaml   # Initial table creations, sequences, etc.
+    ├── 002_add_sales_table.yaml  # Feature-specific or table-specific changes
+    ├── 003_add_products_table.yaml
+    └── 004_insert_initial_data.yaml
+
+
+# my_snowflake_db_project/db.changelog-master.yaml
+
+databaseChangeLog:
+  # Initial setup of core tables and objects
+  - include:
+      file: changes/001_initial_schema.yaml
+
+  # Feature: Sales Management
+  - include:
+      file: changes/002_add_sales_table.yaml
+  - include:
+      file: changes/003_add_products_table.yaml
+
+  # Data seeding (often separated from schema changes)
+  - include:
+      file: changes/004_insert_initial_data.yaml
+
+  # Add more includes here as your project evolves
+  # For example:
+  # - include:
+  #     file: changes/005_add_customer_details.yaml
+  # - include:
+  #     file: changes/006_create_reporting_views.sql # Can include raw SQL files too!
+
+
+
+# my_snowflake_db_project/changes/001_initial_schema.yaml
+
+databaseChangeLog:
+  - changeSet:
+      id: create-users-table
+      author: amit
+      comment: Creates the initial users table
+      changes:
+        - createTable:
+            tableName: users
+            columns:
+              - column:
+                  name: user_id
+                  type: INT
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+                    startWith: 1 # Snowflake IDENTITY property equivalent
+                    incrementBy: 1
+              - column:
+                  name: username
+                  type: VARCHAR(255)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: email
+                  type: VARCHAR(255)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: created_at
+                  type: TIMESTAMP_NTZ
+                  defaultValueComputed: CURRENT_TIMESTAMP() # Snowflake specific function
+
+
+
+
+# my_snowflake_db_project/changes/002_add_sales_table.yaml
+
+databaseChangeLog:
+  - changeSet:
+      id: create-sales-table
+      author: amit
+      comment: Creates the sales transaction table
+      changes:
+        - createTable:
+            tableName: sales
+            columns:
+              - column:
+                  name: sale_id
+                  type: NUMBER(38,0) # Snowflake's INT is really NUMBER(38,0)
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+                    startWith: 1
+                    incrementBy: 1
+              - column:
+                  name: user_id
+                  type: INT
+                  constraints:
+                    nullable: false
+                    references: users(user_id) # Foreign key to the users table
+                    foreignKeyName: fk_sales_user
+              - column:
+                  name: sale_date
+                  type: DATE
+                  constraints:
+                    nullable: false
+              - column:
+                  name: total_amount
+                  type: NUMBER(10, 2)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: status
+                  type: VARCHAR(50)
+                  defaultValue: 'PENDING'
+
+
+# my_snowflake_db_project/changes/003_add_products_table.yaml
+
+databaseChangeLog:
+  - changeSet:
+      id: create-products-table
+      author: amit
+      comment: Creates the products catalog table
+      changes:
+        - createTable:
+            tableName: products
+            columns:
+              - column:
+                  name: product_id
+                  type: INT
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+                    startWith: 1
+                    incrementBy: 1
+              - column:
+                  name: product_name
+                  type: VARCHAR(255)
+                  constraints:
+                    unique: true
+                    nullable: false
+              - column:
+                  name: description
+                  type: VARCHAR(1000)
+              - column:
+                  name: price
+                  type: NUMBER(10, 2)
+                  constraints:
+                    nullable: false
+
+
+# my_snowflake_db_project/changes/004_insert_initial_data.yaml
+
+databaseChangeLog:
+  - changeSet:
+      id: insert-initial-users
+      author: amit
+      comment: Inserts some initial user data
+      changes:
+        - insert:
+            tableName: users
+            columns:
+              - column: {name: user_id, value: 101}
+              - column: {name: username, value: "admin_user"}
+              - column: {name: email, value: "admin@example.com"}
+        - insert:
+            tableName: users
+            columns:
+              - column: {name: user_id, value: 102}
+              - column: {name: username, value: "test_user"}
+              - column: {name: email, value: "test@example.com"}
+
+  - changeSet:
+      id: insert-initial-products
+      author: amit
+      comment: Inserts some initial product data
+      changes:
+        - insert:
+            tableName: products
+            columns:
+              - column: {name: product_id, value: 1}
+              - column: {name: product_name, value: "Laptop"}
+              - column: {name: description, value: "High-performance laptop"}
+              - column: {name: price, value: 1200.00}
+        - insert:
+            tableName: products
+            columns:
+              - column: {name: product_id, value: 2}
+              - column: {name: product_name, value: "Mouse"}
+              - column: {name: description, value: "Wireless ergonomic mouse"}
+              - column: {name: price, value: 35.00}
 
