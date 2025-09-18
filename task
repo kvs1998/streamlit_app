@@ -240,12 +240,13 @@ databaseChangeLog:
 
 
 # my_snowflake_db_project/changes/004_insert_initial_data.yaml
+# my_snowflake_db_project/changes/004_insert_initial_data.yaml
 
 databaseChangeLog:
   - changeSet:
       id: insert-initial-users
       author: amit
-      comment: Inserts some initial user data
+      comment: Inserts some initial user data into the users table
       changes:
         - insert:
             tableName: users
@@ -263,7 +264,7 @@ databaseChangeLog:
   - changeSet:
       id: insert-initial-products
       author: amit
-      comment: Inserts some initial product data
+      comment: Inserts some initial product data into the products table
       changes:
         - insert:
             tableName: products
@@ -280,3 +281,32 @@ databaseChangeLog:
               - column: {name: description, value: "Wireless ergonomic mouse"}
               - column: {name: price, value: 35.00}
 
+  - changeSet:
+      id: insert-initial-sales
+      author: amit
+      comment: Inserts some initial sales data into the sales table
+      changes:
+        - insert:
+            tableName: sales
+            columns:
+              - column: {name: sale_id, value: 1001}
+              - column: {name: user_id, value: 101} # References admin_user
+              - column: {name: sale_date, value: "2024-09-10"}
+              - column: {name: total_amount, value: 1200.00}
+              - column: {name: status, value: "COMPLETED"}
+        - insert:
+            tableName: sales
+            columns:
+              - column: {name: sale_id, value: 1002}
+              - column: {name: user_id, value: 102} # References test_user
+              - column: {name: sale_date, value: "2024-09-11"}
+              - column: {name: total_amount, value: 35.00}
+              - column: {name: status, value: "PENDING"}
+        - insert:
+            tableName: sales
+            columns:
+              - column: {name: sale_id, value: 1003}
+              - column: {name: user_id, value: 101} # References admin_user
+              - column: {name: sale_date, value: "2024-09-12"}
+              - column: {name: total_amount, value: 2400.00}
+              - column: {name: status, value: "COMPLETED"}
