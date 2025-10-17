@@ -2,3 +2,22 @@ SHOW TASKS LIKE 'task%';
 
 SELECT "name", "state", "last_scheduled_time", "last_successful_completion_time"
 FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+
+-- columns in A but not B
+SELECT 'IN_A_NOT_IN_B' as source, column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_A'
+MINUS
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_B';
+
+-- columns in B but not A
+SELECT 'IN_B_NOT_IN_A' as source, column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_B'
+MINUS
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_A';
