@@ -24,85 +24,115 @@ WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_A';
 
 
 
-SET target_word = 'nanosecond'; -- Or 'microsecond', or any other word you want to find
-
--- Create a TEMPORARY table to store your list of objects.
--- This table is session-bound and automatically dropped when the session ends.
-CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (
-    OBJECT_NAME VARCHAR(255)
-);
-
--- Insert your object names into the temporary table
-INSERT INTO MY_OBJECT_LIST (OBJECT_NAME) VALUES
-    ('YOUR_TABLE_1'),
-    ('YOUR_VIEW_2'),
-    ('YOUR_TABLE_3');
-    -- Add all your objects here
-
--- Create another TEMPORARY table to store the messages we want to "print".
--- This will hold our results before the final SELECT.
-CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (
-    MESSAGE_TEXT VARCHAR(1000)
-);
-
-
+-- Example anonymous block: configurable matching and occurrence counts
 
 BEGIN
-  -- Target word to find in DDLs
-  LET target_word STRING := 'nanosecond';
+  -- Config flags (change as needed)
+  LET target_word STRING := 'nanosecond';       -- word to search
+  LET use_exact_word_match BOOLEAN := TRUE;     -- TRUE => whole-word match (\b), FALSE => substring
+  LET case_insensitive BOOLEAN := TRUE;         -- TRUE => case-insensitive, FALSE => case-sensitive
 
-  -- Create temporary tables
+  -- Create / populate object list (object_type optional; default to 'TABLE')
   EXECUTE IMMEDIATE '
-    CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (OBJECT_NAME VARCHAR(255))
+    CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (
+      OBJECT_NAME VARCHAR(255),
+      OBJECT_TYPE VARCHAR(50) DEFAULT ''TABLE''
+    )
   ';
 
   EXECUTE IMMEDIATE '
-    INSERT INTO MY_OBJECT_LIST (OBJECT_NAME) VALUES
-      (''YOUR_TABLE_1''), 
-      (''YOUR_VIEW_2''), 
-      (''YOUR_TABLE_3'')
+    INSERT INTO MY_OBJECT_LIST (OBJECT_NAME, OBJECT_TYPE) VALUES
+      (''YOUR_TABLE_1'', ''TABLE''),
+      (''YOUR_VIEW_2'', ''VIEW''),
+      (''YOUR_TABLE_3'', ''TABLE'')
   ';
 
+  -- Messages table
   EXECUTE IMMEDIATE '
-    CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (MESSAGE_TEXT VARCHAR(1000))
+    CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (
+      MESSAGE_TEXT VARCHAR(1000)
+    )
   ';
 
-  -- Declare block variables
+  -- variables for loop
   DECLARE
-      object_cursor CURSOR FOR SELECT OBJECT_NAME FROM MY_OBJECT_LIST;
-      object_name_var STRING;
-      ddl_result STRING;
-      found_count NUMBER := 0;
-      insert_message_sql STRING;
+    object_cursor CURSOR FOR SELECT OBJECT_NAME, OBJECT_TYPE FROM MY_OBJECT_LIST;
+    object_name_var STRING;
+    object_type_var STRING;
+    ddl_result STRING;
+    occurrences NUMBER := 0;
+    total_objects_with_matches NUMBER := 0;
+    total_occurrences NUMBER := 0;
+    regex_pattern STRING;
+    regex_prefix STRING := ''''; -- used for (?i) prefix when case-insensitive
+    insert_message_sql STRING;
   BEGIN
-      FOR object_row IN object_cursor DO
-          object_name_var := object_row.OBJECT_NAME;
+    -- Build the regex prefix for case-insensitive mode
+    IF case_insensitive THEN
+      -- '(?i)' enables case-insensitive matching in Snowflake regex
+      regex_prefix := '(?i)';
+    ELSE
+      regex_prefix := '';
+    END IF;
 
-          ddl_result := GET_DDL('TABLE', object_name_var);
+    -- Loop each object
+    FOR object_row IN object_cursor DO
+      object_name_var := object_row.OBJECT_NAME;
+      object_type_var := NVL(object_row.OBJECT_TYPE, 'TABLE');
 
-          IF (ddl_result ILIKE '%' || target_word || '%') THEN
-              found_count := found_count + 1;
-              insert_message_sql := 
-                  'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
-                  || object_name_var || '" DDL contains "' || target_word || '".'')';
-              EXECUTE IMMEDIATE insert_message_sql;
-          END IF;
-      END FOR;
+      -- Get the DDL for the object (GET_DDL expects the object type as first arg)
+      -- Note: GET_DDL returns a single string (CREATE ...), or errors if object not found.
+      -- Wrap in TRY/CATCH style using a conditional SELECT to avoid hard failure if needed
+      ddl_result := GET_DDL(object_type_var, object_name_var);
 
-      -- Insert summary
-      IF (found_count = 0) THEN
-          insert_message_sql := 
-              'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''No objects found containing "' 
-              || target_word || '" in their DDL.'')';
-          EXECUTE IMMEDIATE insert_message_sql;
+      -- Build regex pattern (escape the target_word for regex special chars if needed)
+      -- For simplicity below we treat target_word as literal text. If you expect regex chars in the word,
+      -- you'd need to escape them; this version assumes a literal search.
+      IF use_exact_word_match THEN
+        -- whole word: use boundary \b. In Snowflake string literal we need single backslash,
+        -- but since we're building a string we write '\\b' in SQL literal context.
+        -- Here we build pattern like '(?i)\bword\b' or '\bword\b'
+        regex_pattern := regex_prefix || '\\b' || target_word || '\\b';
       ELSE
-          insert_message_sql := 
-              'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''' 
-              || found_count || ' object(s) found containing "' || target_word || '" in their DDL.'')';
-          EXECUTE IMMEDIATE insert_message_sql;
+        -- substring search
+        regex_pattern := regex_prefix || target_word;
       END IF;
+
+      -- Count occurrences using REGEXP_COUNT
+      occurrences := REGEXP_COUNT(ddl_result, regex_pattern);
+
+      -- If occurrences > 0 insert message and update totals
+      IF occurrences > 0 THEN
+        total_objects_with_matches := total_objects_with_matches + 1;
+        total_occurrences := total_occurrences + occurrences;
+
+        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
+                              || object_name_var || '" (' || object_type_var || ') contains "' 
+                              || target_word || '" ' || occurrences || ' time(s) in its DDL.'')';
+        EXECUTE IMMEDIATE insert_message_sql;
+      ELSE
+        -- optional: record objects where not found (comment/uncomment as desired)
+        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
+                              || object_name_var || '" (' || object_type_var || ') does NOT contain "' 
+                              || target_word || '" in its DDL.'')';
+        EXECUTE IMMEDIATE insert_message_sql;
+      END IF;
+    END FOR;
+
+    -- Insert summary messages
+    IF total_objects_with_matches = 0 THEN
+      insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''No objects found containing "' 
+                            || target_word || '" in their DDL.'')';
+      EXECUTE IMMEDIATE insert_message_sql;
+    ELSE
+      insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''' 
+                            || total_objects_with_matches || ' object(s) contain "' || target_word || '" (total ' 
+                            || total_occurrences || ' occurrence(s) across all objects). '')';
+      EXECUTE IMMEDIATE insert_message_sql;
+    END IF;
+
   END;
 END;
 
--- Finally view results
+-- View messages
 SELECT MESSAGE_TEXT FROM DDL_CHECK_MESSAGES ORDER BY MESSAGE_TEXT;
