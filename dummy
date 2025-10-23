@@ -23,8 +23,8 @@ FROM information_schema.columns
 WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_A';
 
 
-
--- Example anonymous block: configurable matching and occurrence counts
+-- Corrected anonymous block: use REGEXP_COUNT parameters for case-insensitive matching,
+-- escape \b properly, and append () for FUNCTION when calling GET_DDL.
 
 BEGIN
   -- Config flags (change as needed)
@@ -35,16 +35,17 @@ BEGIN
   -- Create / populate object list (object_type optional; default to 'TABLE')
   EXECUTE IMMEDIATE '
     CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (
-      OBJECT_NAME VARCHAR(255),
+      OBJECT_NAME VARCHAR(4000),
       OBJECT_TYPE VARCHAR(50) DEFAULT ''TABLE''
     )
   ';
 
+  -- Example rows - replace with your real objects
   EXECUTE IMMEDIATE '
     INSERT INTO MY_OBJECT_LIST (OBJECT_NAME, OBJECT_TYPE) VALUES
       (''YOUR_TABLE_1'', ''TABLE''),
-      (''YOUR_VIEW_2'', ''VIEW''),
-      (''YOUR_TABLE_3'', ''TABLE'')
+      (''YOUR_VIEW_2'',  ''VIEW''),
+      (''YOUR_FUNC3'',  ''FUNCTION'')   -- functions will use () when calling GET_DDL
   ';
 
   -- Messages table
@@ -59,47 +60,65 @@ BEGIN
     object_cursor CURSOR FOR SELECT OBJECT_NAME, OBJECT_TYPE FROM MY_OBJECT_LIST;
     object_name_var STRING;
     object_type_var STRING;
+    object_name_for_ddl STRING;
     ddl_result STRING;
     occurrences NUMBER := 0;
     total_objects_with_matches NUMBER := 0;
     total_occurrences NUMBER := 0;
     regex_pattern STRING;
-    regex_prefix STRING := ''''; -- used for (?i) prefix when case-insensitive
+    regex_flags STRING := '';
     insert_message_sql STRING;
+    object_exists NUMBER := 0;
   BEGIN
-    -- Build the regex prefix for case-insensitive mode
+    -- Build regex flags string for REGEXP_COUNT (use 'i' for case-insensitive)
     IF case_insensitive THEN
-      -- '(?i)' enables case-insensitive matching in Snowflake regex
-      regex_prefix := '(?i)';
+      regex_flags := 'i';
     ELSE
-      regex_prefix := '';
+      regex_flags := '';
     END IF;
 
     -- Loop each object
     FOR object_row IN object_cursor DO
       object_name_var := object_row.OBJECT_NAME;
-      object_type_var := NVL(object_row.OBJECT_TYPE, 'TABLE');
+      object_type_var := NVL(UPPER(object_row.OBJECT_TYPE), 'TABLE');
 
-      -- Get the DDL for the object (GET_DDL expects the object type as first arg)
-      -- Note: GET_DDL returns a single string (CREATE ...), or errors if object not found.
-      -- Wrap in TRY/CATCH style using a conditional SELECT to avoid hard failure if needed
-      ddl_result := GET_DDL(object_type_var, object_name_var);
+      -- Ensure the object exists in the current DB/SCHEMA by querying INFORMATION_SCHEMA.OBJECTS
+      -- This prevents GET_DDL from throwing if the object is absent.
+      SELECT COUNT(*) INTO :object_exists
+      FROM INFORMATION_SCHEMA.OBJECTS
+      WHERE OBJECT_NAME = object_name_var
+        AND UPPER(OBJECT_TYPE) = object_type_var
+      LIMIT 1;
 
-      -- Build regex pattern (escape the target_word for regex special chars if needed)
-      -- For simplicity below we treat target_word as literal text. If you expect regex chars in the word,
-      -- you'd need to escape them; this version assumes a literal search.
-      IF use_exact_word_match THEN
-        -- whole word: use boundary \b. In Snowflake string literal we need single backslash,
-        -- but since we're building a string we write '\\b' in SQL literal context.
-        -- Here we build pattern like '(?i)\bword\b' or '\bword\b'
-        regex_pattern := regex_prefix || '\\b' || target_word || '\\b';
-      ELSE
-        -- substring search
-        regex_pattern := regex_prefix || target_word;
+      IF object_exists = 0 THEN
+        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
+                              || object_name_var || '" of type ' || object_type_var || ' not found.'')';
+        EXECUTE IMMEDIATE insert_message_sql;
+        CONTINUE;
       END IF;
 
-      -- Count occurrences using REGEXP_COUNT
-      occurrences := REGEXP_COUNT(ddl_result, regex_pattern);
+      -- Build object name for GET_DDL: append () for functions (per your note)
+      IF object_type_var = 'FUNCTION' THEN
+        object_name_for_ddl := object_name_var || '()';
+      ELSE
+        object_name_for_ddl := object_name_var;
+      END IF;
+
+      -- Get the DDL for the object (GET_DDL returns a single string)
+      ddl_result := GET_DDL(object_type_var, object_name_for_ddl);
+
+      -- Build regex pattern: escape word boundaries properly for SQL string (use \\b)
+      IF use_exact_word_match THEN
+        -- whole word match using word boundaries \b
+        regex_pattern := '\\b' || target_word || '\\b';
+      ELSE
+        -- substring
+        regex_pattern := target_word;
+      END IF;
+
+      -- Count occurrences using REGEXP_COUNT.
+      -- Use position=1, occurrence=0 to count all occurrences, and pass regex_flags ('i' or '')
+      occurrences := REGEXP_COUNT(ddl_result, regex_pattern, 1, 0, regex_flags);
 
       -- If occurrences > 0 insert message and update totals
       IF occurrences > 0 THEN
@@ -111,7 +130,7 @@ BEGIN
                               || target_word || '" ' || occurrences || ' time(s) in its DDL.'')';
         EXECUTE IMMEDIATE insert_message_sql;
       ELSE
-        -- optional: record objects where not found (comment/uncomment as desired)
+        -- optional: record objects where not found
         insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
                               || object_name_var || '" (' || object_type_var || ') does NOT contain "' 
                               || target_word || '" in its DDL.'')';
