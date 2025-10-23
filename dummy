@@ -23,10 +23,11 @@ FROM information_schema.columns
 WHERE table_catalog='DB' AND table_schema='SCHEMA' AND table_name='TABLE_A';
 
 
+
 SET target_word = 'nanosecond'; -- Or 'microsecond', or any other word you want to find
 
 -- Create a TEMPORARY table to store your list of objects.
--- Temporary tables are session-bound and automatically dropped when the session ends.
+-- This table is session-bound and automatically dropped when the session ends.
 CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (
     OBJECT_NAME VARCHAR(255)
 );
@@ -38,34 +39,49 @@ INSERT INTO MY_OBJECT_LIST (OBJECT_NAME) VALUES
     ('YOUR_TABLE_3');
     -- Add all your objects here
 
+-- Create another TEMPORARY table to store the messages we want to "print".
+-- This will hold our results before the final SELECT.
+CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (
+    MESSAGE_TEXT VARCHAR(1000)
+);
+
 -- Loop through the object list and check their DDL
 DECLARE
     object_cursor CURSOR FOR SELECT OBJECT_NAME FROM MY_OBJECT_LIST;
     object_name_var VARCHAR;
     ddl_result VARCHAR;
-    found_count NUMBER DEFAULT 0; -- To keep track of how many objects matched
+    found_count NUMBER DEFAULT 0;
+    insert_message_sql TEXT; -- Declare a variable for the dynamic SQL
 BEGIN
     FOR object_row IN object_cursor DO
         object_name_var := object_row.OBJECT_NAME;
 
         -- Get the DDL using your utility function
         -- IMPORTANT: Adjust 'TABLE' to 'VIEW', 'FUNCTION', etc., if your objects are not tables
+        -- You might need a CASE statement here if your MY_OBJECT_LIST contains mixed types
         ddl_result := UTILITY.GET_DDL('TABLE', object_name_var);
 
         -- Check if the target word exists in the DDL
         IF (CONTAINS(ddl_result, :target_word)) THEN
             found_count := found_count + 1;
-            -- Print the object name if the word is found
-            SYSTEM$COMMAND_MESSAGE('Object "' || object_name_var || '" DDL contains "' || :target_word || '".');
+            insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' || object_name_var || '" DDL contains "' || :target_word || '".'')';
+            EXECUTE IMMEDIATE :insert_message_sql;
         END IF;
     END FOR;
 
+    -- Insert summary messages
     IF (found_count = 0) THEN
-        SYSTEM$COMMAND_MESSAGE('No objects found containing "' || :target_word || '" in their DDL.');
+        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''No objects found containing "' || :target_word || '" in their DDL.'')';
+        EXECUTE IMMEDIATE :insert_message_sql;
     ELSE
-        SYSTEM$COMMAND_MESSAGE(found_count || ' object(s) found containing "' || :target_word || '" in their DDL.');
+        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''' || found_count || ' object(s) found containing "' || :target_word || '" in their DDL.'')';
+        EXECUTE IMMEDIATE :insert_message_sql;
     END IF;
 END;
+; -- End of the DECLARE/BEGIN/END block
 
--- No permanent DDL_CHECK_RESULTS table created.
--- The temporary table MY_OBJECT_LIST will be dropped automatically when the session ends.
+-- Finally, select all messages from the temporary messages table
+SELECT MESSAGE_TEXT FROM DDL_CHECK_MESSAGES ORDER BY MESSAGE_TEXT;
+
+-- Both MY_OBJECT_LIST and DDL_CHECK_MESSAGES are TEMPORARY and will be dropped
+-- automatically when your session ends.
