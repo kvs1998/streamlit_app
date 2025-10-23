@@ -45,43 +45,64 @@ CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (
     MESSAGE_TEXT VARCHAR(1000)
 );
 
--- Loop through the object list and check their DDL
-DECLARE
-    object_cursor CURSOR FOR SELECT OBJECT_NAME FROM MY_OBJECT_LIST;
-    object_name_var VARCHAR;
-    ddl_result VARCHAR;
-    found_count NUMBER DEFAULT 0;
-    insert_message_sql TEXT; -- Declare a variable for the dynamic SQL
+
+
 BEGIN
-    FOR object_row IN object_cursor DO
-        object_name_var := object_row.OBJECT_NAME;
+  -- Target word to find in DDLs
+  LET target_word STRING := 'nanosecond';
 
-        -- Get the DDL using your utility function
-        -- IMPORTANT: Adjust 'TABLE' to 'VIEW', 'FUNCTION', etc., if your objects are not tables
-        -- You might need a CASE statement here if your MY_OBJECT_LIST contains mixed types
-        ddl_result := UTILITY.GET_DDL('TABLE', object_name_var);
+  -- Create temporary tables
+  EXECUTE IMMEDIATE '
+    CREATE OR REPLACE TEMPORARY TABLE MY_OBJECT_LIST (OBJECT_NAME VARCHAR(255))
+  ';
 
-        -- Check if the target word exists in the DDL
-        IF (CONTAINS(ddl_result, :target_word)) THEN
-            found_count := found_count + 1;
-            insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' || object_name_var || '" DDL contains "' || :target_word || '".'')';
-            EXECUTE IMMEDIATE :insert_message_sql;
-        END IF;
-    END FOR;
+  EXECUTE IMMEDIATE '
+    INSERT INTO MY_OBJECT_LIST (OBJECT_NAME) VALUES
+      (''YOUR_TABLE_1''), 
+      (''YOUR_VIEW_2''), 
+      (''YOUR_TABLE_3'')
+  ';
 
-    -- Insert summary messages
-    IF (found_count = 0) THEN
-        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''No objects found containing "' || :target_word || '" in their DDL.'')';
-        EXECUTE IMMEDIATE :insert_message_sql;
-    ELSE
-        insert_message_sql := 'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''' || found_count || ' object(s) found containing "' || :target_word || '" in their DDL.'')';
-        EXECUTE IMMEDIATE :insert_message_sql;
-    END IF;
+  EXECUTE IMMEDIATE '
+    CREATE OR REPLACE TEMPORARY TABLE DDL_CHECK_MESSAGES (MESSAGE_TEXT VARCHAR(1000))
+  ';
+
+  -- Declare block variables
+  DECLARE
+      object_cursor CURSOR FOR SELECT OBJECT_NAME FROM MY_OBJECT_LIST;
+      object_name_var STRING;
+      ddl_result STRING;
+      found_count NUMBER := 0;
+      insert_message_sql STRING;
+  BEGIN
+      FOR object_row IN object_cursor DO
+          object_name_var := object_row.OBJECT_NAME;
+
+          ddl_result := GET_DDL('TABLE', object_name_var);
+
+          IF (ddl_result ILIKE '%' || target_word || '%') THEN
+              found_count := found_count + 1;
+              insert_message_sql := 
+                  'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''Object "' 
+                  || object_name_var || '" DDL contains "' || target_word || '".'')';
+              EXECUTE IMMEDIATE insert_message_sql;
+          END IF;
+      END FOR;
+
+      -- Insert summary
+      IF (found_count = 0) THEN
+          insert_message_sql := 
+              'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''No objects found containing "' 
+              || target_word || '" in their DDL.'')';
+          EXECUTE IMMEDIATE insert_message_sql;
+      ELSE
+          insert_message_sql := 
+              'INSERT INTO DDL_CHECK_MESSAGES (MESSAGE_TEXT) VALUES (''' 
+              || found_count || ' object(s) found containing "' || target_word || '" in their DDL.'')';
+          EXECUTE IMMEDIATE insert_message_sql;
+      END IF;
+  END;
 END;
-; -- End of the DECLARE/BEGIN/END block
 
--- Finally, select all messages from the temporary messages table
+-- Finally view results
 SELECT MESSAGE_TEXT FROM DDL_CHECK_MESSAGES ORDER BY MESSAGE_TEXT;
-
--- Both MY_OBJECT_LIST and DDL_CHECK_MESSAGES are TEMPORARY and will be dropped
--- automatically when your session ends.
