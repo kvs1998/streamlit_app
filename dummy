@@ -155,3 +155,115 @@ END;
 
 -- View messages
 SELECT MESSAGE_TEXT FROM DDL_CHECK_MESSAGES ORDER BY MESSAGE_TEXT;
+
+
+
+
+
+
+
+
+
+
+WITH warehouse_hourly_credits AS (
+    SELECT
+        START_TIME AS hour_start,
+        END_TIME AS hour_end,
+        WAREHOUSE_NAME,
+        CREDITS_USED_COMPUTE AS hourly_compute_credits
+    FROM
+        TABLE(INFORMATION_SCHEMA.WAREHOUSE_METERING_HISTORY(
+            DATE_RANGE_START => DATEADD('day', -7, CURRENT_DATE()),
+            DATE_RANGE_END => CURRENT_DATE()
+        ))
+    WHERE
+        hourly_compute_credits > 0
+),
+query_details AS (
+    SELECT
+        QUERY_ID,
+        QUERY_TEXT,
+        WAREHOUSE_NAME,
+        START_TIME AS query_start,
+        END_TIME AS query_end,
+        DATEDIFF(MILLISECOND, query_start, query_end) AS query_duration_ms,
+        (DATEDIFF(MILLISECOND, query_start, query_end) / 1000.0) AS query_duration_seconds
+    FROM
+        TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE(
+            END_TIME_RANGE_START => DATEADD('day', -7, CURRENT_TIMESTAMP()),
+            END_TIME_RANGE_END => CURRENT_TIMESTAMP(),
+            RESULT_LIMIT => 10000 -- Adjust limit or implement pagination if needed
+        ))
+    WHERE
+        WAREHOUSE_NAME IS NOT NULL
+        AND execution_status = 'SUCCESS'
+        AND query_start IS NOT NULL
+        AND query_end IS NOT NULL
+        AND query_duration_ms > 0
+),
+query_hourly_intersections AS (
+    SELECT
+        qh.QUERY_ID,
+        qh.WAREHOUSE_NAME,
+        qh.query_start,
+        qh.query_end,
+        qh.query_duration_seconds,
+        whc.hour_start,
+        whc.hour_end,
+        GREATEST(0, DATEDIFF(SECOND,
+            GREATEST(qh.query_start, whc.hour_start),
+            LEAST(qh.query_end, whc.hour_end)
+        )) AS overlap_duration_seconds
+    FROM
+        query_details qh
+    JOIN
+        warehouse_hourly_credits whc
+        ON qh.WAREHOUSE_NAME = whc.WAREHOUSE_NAME
+        AND qh.query_end >= whc.hour_start
+        AND qh.query_start < whc.hour_end
+),
+hourly_query_compute_share AS (
+    SELECT
+        qhi.QUERY_ID,
+        qhi.WAREHOUSE_NAME,
+        qhi.query_start,
+        qhi.query_end,
+        qhi.query_duration_seconds,
+        qhi.hour_start,
+        qhi.hour_end,
+        qhi.overlap_duration_seconds,
+        whc.hourly_compute_credits,
+        SUM(qhi.overlap_duration_seconds) OVER (PARTITION BY qhi.WAREHOUSE_NAME, qhi.hour_start) AS total_overlap_duration_in_hour
+    FROM
+        query_hourly_intersections qhi
+    JOIN
+        warehouse_hourly_credits whc
+        ON qhi.WAREHOUSE_NAME = whc.WAREHOUSE_NAME
+        AND qhi.hour_start = whc.hour_start
+    WHERE
+        qhi.overlap_duration_seconds > 0
+)
+SELECT
+    hqcs.QUERY_ID,
+    hqcs.WAREHOUSE_NAME,
+    hqcs.query_start,
+    hqcs.query_end,
+    hqcs.query_duration_seconds,
+    -- You can aggregate the estimated_compute_credits_in_hour per QUERY_ID
+    SUM(CASE
+        WHEN hqcs.total_overlap_duration_in_hour > 0 THEN
+            (hqcs.overlap_duration_seconds / hqcs.total_overlap_duration_in_hour) * hqcs.hourly_compute_credits
+        ELSE 0
+    END) AS estimated_compute_credits_per_query
+FROM
+    hourly_query_compute_share hqcs
+WHERE
+    hqcs.total_overlap_duration_in_hour > 0
+GROUP BY
+    hqcs.QUERY_ID,
+    hqcs.WAREHOUSE_NAME,
+    hqcs.query_start,
+    hqcs.query_end,
+    hqcs.query_duration_seconds
+ORDER BY
+    hqcs.WAREHOUSE_NAME, hqcs.query_start;
