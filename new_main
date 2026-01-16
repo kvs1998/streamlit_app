@@ -1,0 +1,91 @@
+import streamlit as st
+from snowflake.snowpark.context import get_active_session
+import pandas as pd
+
+st.set_page_config(layout="wide")
+session = get_active_session()
+
+st.title("Multi-Environment Dynamic Table Monitor")
+
+# 1. Configuration & Filters
+all_envs = ["DEV", "TST", "SPC", "BFM", "LOS"]
+selected_envs = st.multiselect("Select Environments to View", all_envs, default=all_envs)
+
+# 2. Data Fetching
+def get_dt_data():
+    # Fetching core metadata and scheduling state
+    query = """
+    SELECT 
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME,
+        SCHEDULING_STATE:STATE::STRING as SCHED_STATE,
+        LAST_COMPLETED_REFRESH_STATE as REFRESH_STATE
+    FROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLES(RESULT_LIMIT => 10000))
+    """
+    return session.sql(query).to_pandas()
+
+df = get_dt_data()
+
+# 3. Processing Logic
+# Identify environment from Database Name (assuming ENV_DB pattern)
+df['ENV'] = df['DATABASE_NAME'].apply(lambda x: next((e for e in all_envs if e in x.upper()), "OTHER"))
+
+# Filter by selected environments
+df_filtered = df[df['ENV'].isin(selected_envs)].copy()
+
+# Create a unique list of Table identities
+table_registry = df_filtered[['SCHEMA_NAME', 'NAME']].drop_duplicates().sort_values(['SCHEMA_NAME', 'NAME'])
+
+# --- 4. Dashboard UI ---
+
+# Header Row
+cols = st.columns([2, 2] + [3 for _ in selected_envs])
+cols[0].write("**Schema**")
+cols[1].write("**Table Name**")
+
+for i, env in enumerate(selected_envs):
+    # This creates the "Label" per Environment
+    cols[i+2].markdown(f"<div style='text-align: center; background-color: #2b2b2b; padding: 5px; border-radius: 5px;'><b>{env}</b></div>", unsafe_allow_html=True)
+    
+    # Sub-headers for Active, Suspended, Failed
+    sub1, sub2, sub3 = cols[i+2].columns(3)
+    sub1.caption("ACT")
+    sub2.caption("SUS")
+    sub3.caption("FAIL")
+
+st.divider()
+
+# Data Rows
+for _, row in table_registry.iterrows():
+    row_cols = st.columns([2, 2] + [3 for _ in selected_envs])
+    row_cols[0].write(row['SCHEMA_NAME'])
+    row_cols[1].write(row['NAME'])
+    
+    for i, env in enumerate(selected_envs):
+        # Find if this table exists in this environment
+        match = df_filtered[
+            (df_filtered['NAME'] == row['NAME']) & 
+            (df_filtered['SCHEMA_NAME'] == row['SCHEMA_NAME']) & 
+            (df_filtered['ENV'] == env)
+        ]
+        
+        env_sub1, env_sub2, env_sub3 = row_cols[i+2].columns(3)
+        
+        if not match.empty:
+            status = match.iloc[0]
+            
+            # Active Check (Running and not failed)
+            if status['SCHED_STATE'] == 'RUNNING' and status['REFRESH_STATE'] != 'FAILED':
+                env_sub1.write("✅")
+            
+            # Suspended Check
+            if status['SCHED_STATE'] == 'SUSPENDED':
+                env_sub2.write("⏸️")
+                
+            # Failed Check
+            if status['REFRESH_STATE'] == 'FAILED':
+                env_sub3.write("❌")
+        else:
+            # Table doesn't exist in this specific env
+            env_sub2.write("-")
