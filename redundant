@@ -14,8 +14,8 @@ ORDER BY dt.database_name, dt.schema_name, dt.name;
 
 WITH params AS (
     SELECT
-        UPPER('ADC_PUB_LL') AS table_schema,
-        UPPER('SV_IBOR_ALADDIN_FAIL') AS table_name
+        UPPER('') AS table_schema,
+        UPPER('') AS table_name
 ),
 
 old_cols AS (
