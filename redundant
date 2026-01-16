@@ -11,3 +11,51 @@ JOIN snowflake.account_usage.tasks t
 JOIN snowflake.account_usage.warehouses w
     ON t.warehouse = w.name
 ORDER BY dt.database_name, dt.schema_name, dt.name;
+
+WITH params AS (
+    SELECT
+        UPPER('ADC_PUB_LL') AS table_schema,
+        UPPER('SV_IBOR_ALADDIN_FAIL') AS table_name
+),
+
+old_cols AS (
+    SELECT
+        'OLD' AS source_name,
+        f.value::string AS column_name
+    FROM params p,
+         LATERAL FLATTEN(
+             input => ARRAY_CONSTRUCT(
+                 '
+             )
+         ) f
+),
+
+new_cols AS (
+    SELECT
+        'NEW' AS source_name,
+        f.value::string AS column_name
+    FROM params p,
+         LATERAL FLATTEN(
+             input => ARRAY_CONSTRUCT(
+                 
+             )
+         ) f
+),
+
+expected AS (
+    SELECT * FROM old_cols
+    UNION ALL
+    SELECT * FROM new_cols
+)
+
+SELECT
+    e.source_name,
+    e.column_name,
+    c.column_name IS NOT NULL AS column_exists
+FROM expected e
+CROSS JOIN params p
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS c
+    ON c.table_schema = p.table_schema
+   AND c.table_name   = p.table_name
+   AND c.column_name  = UPPER(e.column_name)
+ORDER BY e.source_name, e.column_name;
